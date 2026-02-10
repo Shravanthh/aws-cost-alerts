@@ -32,7 +32,7 @@ Parameters:
     Description: Days to retain archived data in S3.
   BudgetParameterName:
     Type: String
-    Default: ''
+    Default: /aws-cost-alerts/budget-amount
     Description: SSM Parameter name holding the monthly budget amount.
 
 Conditions:
@@ -126,6 +126,14 @@ Resources:
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
+
+  BudgetAmountParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Ref BudgetParameterName
+      Type: String
+      Value: '10'
+      Description: Monthly budget amount for AWS cost alerts.
 
 Outputs:
   FunctionName:
