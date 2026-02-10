@@ -16,6 +16,7 @@ _ce_client = boto3.client("ce")
 
 DEFAULT_METRIC = os.getenv("COST_METRIC", "UnblendedCost")
 DEFAULT_TOP_SERVICES = 10
+DEFAULT_TREND_DAYS = 7
 DEFAULT_SUBJECT_PREFIX = os.getenv("EMAIL_SUBJECT_PREFIX", "AWS Cost Alert")
 FORECAST_METRIC_MAP = {
     "UnblendedCost": "UNBLENDED_COST",
@@ -191,6 +192,39 @@ def _get_previous_day_cost(today, metric):
     }
 
 
+def _get_daily_costs(today, metric, days):
+    start_date = today - timedelta(days=days)
+    start = start_date.isoformat()
+    end = today.isoformat()
+    response = _ce_client.get_cost_and_usage(
+        TimePeriod={"Start": start, "End": end},
+        Granularity="DAILY",
+        Metrics=[metric],
+    )
+    results = response.get("ResultsByTime", [])
+    daily_costs = []
+    unit = None
+    for entry in results:
+        cost_info = entry.get("Total", {}).get(metric, {})
+        amount = cost_info.get("Amount")
+        unit = cost_info.get("Unit", unit)
+        if amount is None:
+            continue
+        try:
+            amount_value = Decimal(amount)
+        except InvalidOperation:
+            logger.warning("Invalid daily cost amount encountered: %r", amount)
+            continue
+        daily_costs.append(
+            {
+                "date": entry.get("TimePeriod", {}).get("Start"),
+                "amount": amount_value,
+                "unit": unit,
+            }
+        )
+    return daily_costs
+
+
 def _get_month_end(today):
     if today.month == 12:
         return date(today.year + 1, 1, 1)
@@ -255,6 +289,19 @@ def _stringify_service_breakdown(payload):
             service_entry["percent_of_total"] = str(service_entry["percent_of_total"])
         services.append(service_entry)
     formatted["services"] = services
+    return formatted
+
+
+def _stringify_daily_costs(daily_costs):
+    formatted = []
+    for entry in daily_costs or []:
+        formatted.append(
+            {
+                "date": entry.get("date"),
+                "amount": str(entry.get("amount")) if isinstance(entry.get("amount"), Decimal) else entry.get("amount"),
+                "unit": entry.get("unit"),
+            }
+        )
     return formatted
 
 
@@ -352,7 +399,58 @@ def _build_service_breakdown_text(breakdown):
     return "\n".join(lines)
 
 
-def _build_email_content(report_date, month_to_date, forecast, previous_day, service_breakdown):
+def _build_daily_trend_html(daily_costs):
+    if not daily_costs:
+        return "<p>No daily trend data available.</p>"
+
+    max_amount = max((entry["amount"] for entry in daily_costs), default=Decimal("0"))
+    max_height = 60
+    bars = []
+    for entry in daily_costs:
+        amount = entry.get("amount", Decimal("0"))
+        date_label = entry.get("date", "")[-5:] if entry.get("date") else ""
+        if max_amount > 0:
+            bar_height = int((amount / max_amount) * max_height)
+            if amount > 0 and bar_height < 2:
+                bar_height = 2
+        else:
+            bar_height = 0
+        top_padding = max_height - bar_height
+        bars.append(
+            "<td style=\"vertical-align:bottom;padding:0 4px;\">"
+            "<table role=\"presentation\" style=\"border-collapse:collapse;margin:0 auto;\">"
+            f"<tr><td style=\"height:{top_padding}px;width:18px;\"></td></tr>"
+            f"<tr><td style=\"height:{bar_height}px;width:18px;background:#4f8ef7;border-radius:3px;\"></td></tr>"
+            "</table>"
+            f"<div style=\"text-align:center;font-size:11px;color:#666;margin-top:4px;\">"
+            f"{escape(date_label)}</div>"
+            "</td>"
+        )
+
+    return (
+        "<table role=\"presentation\" style=\"width:100%;border-collapse:collapse;\">"
+        "<tr>"
+        f"{''.join(bars)}"
+        "</tr>"
+        "</table>"
+    )
+
+
+def _build_daily_trend_text(daily_costs):
+    if not daily_costs:
+        return "No daily trend data available."
+    lines = ["Daily Trend (most recent days):"]
+    for entry in daily_costs:
+        date_label = entry.get("date", "")
+        amount = entry.get("amount")
+        unit = entry.get("unit")
+        lines.append(f"- {date_label}: {_format_currency(amount, unit)}")
+    return "\n".join(lines)
+
+
+def _build_email_content(
+    report_date, month_to_date, forecast, previous_day, daily_costs, service_breakdown
+):
     subject = f"{DEFAULT_SUBJECT_PREFIX} - {report_date.isoformat()}"
 
     mtd_amount = _format_currency(month_to_date.get("amount"), month_to_date.get("unit")) if month_to_date else "N/A"
@@ -373,6 +471,8 @@ def _build_email_content(report_date, month_to_date, forecast, previous_day, ser
         f"<li>Yesterday: <strong>{previous_day_amount}</strong></li>"
         f"<li>Forecast: <strong>{forecast_amount}</strong></li>"
         "</ul>"
+        "<h3 style=\"margin-bottom:6px;\">Daily Trend</h3>"
+        f"{_build_daily_trend_html(daily_costs)}"
         "<h3 style=\"margin-bottom:6px;\">Top Services</h3>"
         f"{_build_service_breakdown_html(service_breakdown)}"
         "</body></html>"
@@ -385,6 +485,8 @@ def _build_email_content(report_date, month_to_date, forecast, previous_day, ser
             f"Month-to-date: {mtd_amount}",
             f"Yesterday: {previous_day_amount}",
             f"Forecast: {forecast_amount}",
+            "",
+            _build_daily_trend_text(daily_costs),
             "",
             _build_service_breakdown_text(service_breakdown),
         ]
@@ -399,21 +501,24 @@ def lambda_handler(event, context):
     budget_amount = _get_budget_amount()
     today = datetime.now(timezone.utc).date()
     top_services_count = _get_int_env("TOP_SERVICES_COUNT", DEFAULT_TOP_SERVICES)
+    trend_days = _get_int_env("TREND_DAYS", DEFAULT_TREND_DAYS)
 
     try:
         month_to_date = _get_month_to_date_cost(today, DEFAULT_METRIC)
         previous_day = _get_previous_day_cost(today, DEFAULT_METRIC)
         forecast = _get_forecast_cost(today, DEFAULT_METRIC)
+        daily_costs = _get_daily_costs(today, DEFAULT_METRIC, trend_days)
         service_breakdown = _get_service_breakdown(today, DEFAULT_METRIC, top_services_count)
     except ClientError as exc:
         logger.error("Cost Explorer API error: %s", exc)
         month_to_date = None
         previous_day = None
         forecast = None
+        daily_costs = []
         service_breakdown = None
 
     email_content = _build_email_content(
-        today, month_to_date, forecast, previous_day, service_breakdown
+        today, month_to_date, forecast, previous_day, daily_costs, service_breakdown
     )
 
     response = {
@@ -426,6 +531,7 @@ def lambda_handler(event, context):
         "month_to_date": _stringify_cost_payload(month_to_date),
         "previous_day": _stringify_cost_payload(previous_day),
         "forecast": _stringify_cost_payload(forecast),
+        "daily_costs": _stringify_daily_costs(daily_costs),
         "service_breakdown": _stringify_service_breakdown(service_breakdown),
         "email_preview": email_content,
     }

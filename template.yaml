@@ -42,6 +42,10 @@ Parameters:
     Type: Number
     Default: 10
     Description: Number of top services to include in the breakdown.
+  TrendDays:
+    Type: Number
+    Default: 7
+    Description: Number of days to include in the daily trend chart.
 
 Conditions:
   UseArchive: !Equals [!Ref ArchiveEnabled, 'true']
@@ -63,6 +67,7 @@ Globals:
         ARCHIVE_RETENTION_DAYS: !Ref ArchiveRetentionDays
         BUDGET_PARAM_NAME: !Ref BudgetParameterName
         TOP_SERVICES_COUNT: !Ref TopServicesCount
+        TREND_DAYS: !Ref TrendDays
 
 Resources:
   CostAlertFunction:
