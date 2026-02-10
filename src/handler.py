@@ -14,6 +14,7 @@ logger.setLevel(logging.INFO)
 _ssm_client = boto3.client("ssm")
 _ce_client = boto3.client("ce")
 _ses_client = boto3.client("ses")
+_s3_client = boto3.client("s3")
 
 DEFAULT_METRIC = os.getenv("COST_METRIC", "UnblendedCost")
 DEFAULT_TOP_SERVICES = 10
@@ -524,6 +525,24 @@ def _send_email_via_ses(subject, html_body, text_body):
     return response.get("MessageId")
 
 
+def _archive_report(report, report_date):
+    if os.getenv("ARCHIVE_ENABLED", "false").lower() != "true":
+        return None
+    bucket = os.getenv("ARCHIVE_BUCKET", "").strip()
+    if not bucket:
+        logger.warning("ARCHIVE_BUCKET is not configured.")
+        return None
+    key = f"reports/{report_date.isoformat()}.json"
+    payload = json.dumps(report, indent=2)
+    _s3_client.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=payload.encode("utf-8"),
+        ContentType="application/json",
+    )
+    return key
+
+
 def lambda_handler(event, context):
     logger.info("Received event: %s", json.dumps(event))
 
@@ -575,6 +594,14 @@ def lambda_handler(event, context):
         "email_preview": email_content,
         "ses_message_id": message_id,
     }
+
+    archive_key = None
+    try:
+        archive_key = _archive_report(response, today)
+    except ClientError as exc:
+        logger.error("Failed to archive report: %s", exc)
+
+    response["archive_key"] = archive_key
 
     return {
         "statusCode": 200,
