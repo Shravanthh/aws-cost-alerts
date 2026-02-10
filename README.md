@@ -53,3 +53,4 @@ sam deploy \
 - The stack creates an SSM parameter (default `/aws-cost-alerts/budget-amount`) with value `10`.
 - SES must be verified in the region you deploy to.
 - The report runs daily at `08:00 UTC` by default (see `ScheduleExpression` in `template.yaml`).
+- The deploy script auto-creates an S3 bucket for SAM artifacts. Set `SAM_ARTIFACT_BUCKET` in `.env` to control its name.

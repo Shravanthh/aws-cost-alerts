@@ -14,6 +14,7 @@ STACK_NAME="${STACK_NAME:-aws-cost-alerts}"
 AWS_REGION="${AWS_REGION:-}"
 AWS_PROFILE="${AWS_PROFILE:-}"
 PROJECT_NAME="${PROJECT_NAME:-aws-cost-alerts}"
+SAM_ARTIFACT_BUCKET="${SAM_ARTIFACT_BUCKET:-}"
 SCHEDULE_EXPRESSION="${SCHEDULE_EXPRESSION:-cron(0 8 * * ? *)}"
 SENDER_EMAIL="${SENDER_EMAIL:-}"
 RECIPIENT_EMAILS="${RECIPIENT_EMAILS:-}"
@@ -36,13 +37,37 @@ if [ -z "$RECIPIENT_EMAILS" ]; then
   exit 1
 fi
 
+aws_args=()
+if [ -n "$AWS_REGION" ]; then
+  aws_args+=(--region "$AWS_REGION")
+fi
+
+if [ -n "$AWS_PROFILE" ]; then
+  aws_args+=(--profile "$AWS_PROFILE")
+fi
+
+if [ -z "$SAM_ARTIFACT_BUCKET" ]; then
+  if [ -z "$AWS_REGION" ]; then
+    echo "AWS_REGION is required to auto-generate SAM_ARTIFACT_BUCKET."
+    exit 1
+  fi
+  account_id="$(aws "${aws_args[@]}" sts get-caller-identity --query Account --output text)"
+  safe_project_name="$(echo "$PROJECT_NAME" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9-' '-')"
+  SAM_ARTIFACT_BUCKET="${safe_project_name}-sam-artifacts-${account_id}-${AWS_REGION}"
+fi
+
+if ! aws "${aws_args[@]}" s3api head-bucket --bucket "$SAM_ARTIFACT_BUCKET" >/dev/null 2>&1; then
+  echo "Creating SAM artifacts bucket: $SAM_ARTIFACT_BUCKET"
+  aws "${aws_args[@]}" s3 mb "s3://${SAM_ARTIFACT_BUCKET}"
+fi
+
 sam build
 
 deploy_args=(
   deploy
   --stack-name "$STACK_NAME"
   --capabilities CAPABILITY_IAM
-  --resolve-s3
+  --s3-bucket "$SAM_ARTIFACT_BUCKET"
   --no-confirm-changeset
   --no-fail-on-empty-changeset
 )
