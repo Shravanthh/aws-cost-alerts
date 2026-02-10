@@ -46,6 +46,14 @@ Parameters:
     Type: Number
     Default: 7
     Description: Number of days to include in the daily trend chart.
+  AnomalyThresholdPercent:
+    Type: Number
+    Default: 30
+    Description: Percent above 7-day average to flag daily anomaly.
+  BudgetThresholds:
+    Type: String
+    Default: 50,75,90,100
+    Description: Comma-separated budget thresholds to flag (percent).
 
 Conditions:
   UseArchive: !Equals [!Ref ArchiveEnabled, 'true']
@@ -68,6 +76,8 @@ Globals:
         BUDGET_PARAM_NAME: !Ref BudgetParameterName
         TOP_SERVICES_COUNT: !Ref TopServicesCount
         TREND_DAYS: !Ref TrendDays
+        ANOMALY_THRESHOLD_PERCENT: !Ref AnomalyThresholdPercent
+        BUDGET_THRESHOLDS: !Ref BudgetThresholds
 
 Resources:
   CostAlertFunction:

@@ -20,6 +20,8 @@ DEFAULT_METRIC = os.getenv("COST_METRIC", "UnblendedCost")
 DEFAULT_TOP_SERVICES = 10
 DEFAULT_TREND_DAYS = 7
 DEFAULT_SUBJECT_PREFIX = os.getenv("EMAIL_SUBJECT_PREFIX", "AWS Cost Alert")
+DEFAULT_ANOMALY_THRESHOLD_PERCENT = Decimal("30")
+DEFAULT_BUDGET_THRESHOLDS = (Decimal("50"), Decimal("75"), Decimal("90"), Decimal("100"))
 FORECAST_METRIC_MAP = {
     "UnblendedCost": "UNBLENDED_COST",
     "BlendedCost": "BLENDED_COST",
@@ -66,6 +68,44 @@ def _get_int_env(name, default):
         logger.warning("Invalid %s value %r; using default %s.", name, raw_value, default)
         return default
     return parsed
+
+
+def _get_decimal_env(name, default):
+    raw_value = os.getenv(name)
+    if raw_value is None or raw_value.strip() == "":
+        return default
+    try:
+        parsed = Decimal(raw_value.strip())
+    except InvalidOperation:
+        logger.warning("Invalid %s value %r; using default %s.", name, raw_value, default)
+        return default
+    if parsed <= 0:
+        logger.warning("Invalid %s value %r; using default %s.", name, raw_value, default)
+        return default
+    return parsed
+
+
+def _get_thresholds_env(name, default):
+    raw_value = os.getenv(name)
+    if raw_value is None or raw_value.strip() == "":
+        return default
+    thresholds = []
+    for item in raw_value.split(","):
+        value = item.strip()
+        if not value:
+            continue
+        try:
+            parsed = Decimal(value)
+        except InvalidOperation:
+            logger.warning("Invalid threshold value %r in %s.", value, name)
+            continue
+        if parsed <= 0:
+            logger.warning("Invalid threshold value %r in %s.", value, name)
+            continue
+        thresholds.append(parsed)
+    if not thresholds:
+        return default
+    return tuple(sorted(set(thresholds)))
 
 
 def _sum_cost_and_usage(results, metric):
@@ -294,6 +334,59 @@ def _stringify_service_breakdown(payload):
     return formatted
 
 
+def _calculate_budget_alerts(month_to_date, budget_amount, thresholds):
+    if not month_to_date or budget_amount is None or budget_amount <= 0:
+        return []
+    mtd_amount = month_to_date.get("amount")
+    if not isinstance(mtd_amount, Decimal):
+        return []
+    percent_used = (mtd_amount / budget_amount) * Decimal("100")
+    alerts = []
+    for threshold in thresholds:
+        if percent_used >= threshold:
+            alerts.append(
+                {
+                    "type": "BUDGET_THRESHOLD",
+                    "threshold_percent": threshold,
+                    "percent_used": percent_used,
+                }
+            )
+    return alerts
+
+
+def _calculate_daily_anomaly(daily_costs, threshold_percent):
+    if not daily_costs or len(daily_costs) < 2:
+        return None
+    latest = daily_costs[-1]
+    history = daily_costs[:-1]
+    total = Decimal("0")
+    count = 0
+    for entry in history:
+        amount = entry.get("amount")
+        if isinstance(amount, Decimal):
+            total += amount
+            count += 1
+    if count == 0:
+        return None
+    average = total / Decimal(count)
+    latest_amount = latest.get("amount")
+    if not isinstance(latest_amount, Decimal):
+        return None
+    if average == 0:
+        return None
+    percent_over = ((latest_amount - average) / average) * Decimal("100")
+    if percent_over >= threshold_percent:
+        return {
+            "type": "DAILY_ANOMALY",
+            "date": latest.get("date"),
+            "amount": latest_amount,
+            "average": average,
+            "percent_over_average": percent_over,
+            "threshold_percent": threshold_percent,
+        }
+    return None
+
+
 def _stringify_daily_costs(daily_costs):
     formatted = []
     for entry in daily_costs or []:
@@ -304,6 +397,22 @@ def _stringify_daily_costs(daily_costs):
                 "unit": entry.get("unit"),
             }
         )
+    return formatted
+
+
+def _stringify_alerts(alerts):
+    formatted = []
+    for alert in alerts or []:
+        entry = alert.copy()
+        for key in ("threshold_percent", "percent_used", "percent_over_average"):
+            value = entry.get(key)
+            if isinstance(value, Decimal):
+                entry[key] = str(value)
+        for key in ("amount", "average"):
+            value = entry.get(key)
+            if isinstance(value, Decimal):
+                entry[key] = str(value)
+        formatted.append(entry)
     return formatted
 
 
@@ -451,7 +560,13 @@ def _build_daily_trend_text(daily_costs):
 
 
 def _build_email_content(
-    report_date, month_to_date, forecast, previous_day, daily_costs, service_breakdown
+    report_date,
+    month_to_date,
+    forecast,
+    previous_day,
+    daily_costs,
+    service_breakdown,
+    alerts,
 ):
     subject = f"{DEFAULT_SUBJECT_PREFIX} - {report_date.isoformat()}"
 
@@ -463,10 +578,48 @@ def _build_email_content(
         _format_currency(previous_day.get("amount"), previous_day.get("unit")) if previous_day else "N/A"
     )
 
+    alert_html = ""
+    alert_text = ""
+    if alerts:
+        alert_items = []
+        alert_lines = []
+        for alert in alerts:
+            if alert.get("type") == "BUDGET_THRESHOLD":
+                threshold = alert.get("threshold_percent")
+                used = alert.get("percent_used")
+                alert_items.append(
+                    f"<li>Budget usage at {_format_percentage(used)} "
+                    f"(threshold {_format_percentage(threshold)})</li>"
+                )
+                alert_lines.append(
+                    f"- Budget usage at {_format_percentage(used)} "
+                    f"(threshold {_format_percentage(threshold)})"
+                )
+            elif alert.get("type") == "DAILY_ANOMALY":
+                percent_over = alert.get("percent_over_average")
+                alert_items.append(
+                    f"<li>Daily cost anomaly: {_format_percentage(percent_over)} "
+                    "above 7-day average.</li>"
+                )
+                alert_lines.append(
+                    f"- Daily cost anomaly: {_format_percentage(percent_over)} "
+                    "above 7-day average."
+                )
+        if alert_items:
+            alert_html = (
+                "<h3 style=\"margin-bottom:6px;\">Alerts</h3>"
+                "<ul style=\"padding-left:18px;color:#b00020;\">"
+                f"{''.join(alert_items)}"
+                "</ul>"
+            )
+        if alert_lines:
+            alert_text = "Alerts:\n" + "\n".join(alert_lines)
+
     html_body = (
         "<html><body style=\"font-family:Arial, sans-serif;color:#111;\">"
         f"<h2 style=\"margin-bottom:8px;\">AWS Cost Report - {report_date.isoformat()}</h2>"
         "<p style=\"margin-top:0;\">Daily cost summary and service breakdown.</p>"
+        f"{alert_html}"
         "<h3 style=\"margin-bottom:6px;\">Summary</h3>"
         "<ul style=\"padding-left:18px;\">"
         f"<li>Month-to-date: <strong>{mtd_amount}</strong></li>"
@@ -484,6 +637,8 @@ def _build_email_content(
         [
             f"AWS Cost Report - {report_date.isoformat()}",
             "",
+            alert_text,
+            "" if alert_text else "",
             f"Month-to-date: {mtd_amount}",
             f"Yesterday: {previous_day_amount}",
             f"Forecast: {forecast_amount}",
@@ -550,6 +705,10 @@ def lambda_handler(event, context):
     today = datetime.now(timezone.utc).date()
     top_services_count = _get_int_env("TOP_SERVICES_COUNT", DEFAULT_TOP_SERVICES)
     trend_days = _get_int_env("TREND_DAYS", DEFAULT_TREND_DAYS)
+    anomaly_threshold = _get_decimal_env(
+        "ANOMALY_THRESHOLD_PERCENT", DEFAULT_ANOMALY_THRESHOLD_PERCENT
+    )
+    budget_thresholds = _get_thresholds_env("BUDGET_THRESHOLDS", DEFAULT_BUDGET_THRESHOLDS)
 
     try:
         month_to_date = _get_month_to_date_cost(today, DEFAULT_METRIC)
@@ -565,8 +724,20 @@ def lambda_handler(event, context):
         daily_costs = []
         service_breakdown = None
 
+    alerts = []
+    alerts.extend(_calculate_budget_alerts(month_to_date, budget_amount, budget_thresholds))
+    daily_anomaly = _calculate_daily_anomaly(daily_costs, anomaly_threshold)
+    if daily_anomaly:
+        alerts.append(daily_anomaly)
+
     email_content = _build_email_content(
-        today, month_to_date, forecast, previous_day, daily_costs, service_breakdown
+        today,
+        month_to_date,
+        forecast,
+        previous_day,
+        daily_costs,
+        service_breakdown,
+        alerts,
     )
 
     message_id = None
@@ -591,6 +762,7 @@ def lambda_handler(event, context):
         "forecast": _stringify_cost_payload(forecast),
         "daily_costs": _stringify_daily_costs(daily_costs),
         "service_breakdown": _stringify_service_breakdown(service_breakdown),
+        "alerts": _stringify_alerts(alerts),
         "email_preview": email_content,
         "ses_message_id": message_id,
     }
