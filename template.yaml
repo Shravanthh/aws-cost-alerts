@@ -172,9 +172,9 @@ Resources:
         MonitorSchedule:
           Type: Schedule
           Properties:
-            Schedule: rate(6 hours)
+            Schedule: rate(12 hours)
             Name: !Sub '${ProjectName}-monitor-schedule'
-            Description: Ad-hoc cost threshold monitor (every 6 hours)
+            Description: Ad-hoc cost threshold monitor (every 12 hours)
             Enabled: true
 
   ArchiveBucket:
