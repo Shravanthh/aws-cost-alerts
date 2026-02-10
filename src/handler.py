@@ -13,7 +13,6 @@ def lambda_handler(event, context):
     response = {
         "status": "ok",
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "provider": os.getenv("EMAIL_PROVIDER", "SES"),
         "archive_enabled": os.getenv("ARCHIVE_ENABLED", "false"),
     }
 

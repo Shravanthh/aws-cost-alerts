@@ -19,17 +19,6 @@ Parameters:
     Type: String
     Default: ''
     Description: Comma-separated recipient emails.
-  EmailProvider:
-    Type: String
-    Default: SES
-    AllowedValues:
-      - SES
-      - SNS
-    Description: Email provider (SES recommended for HTML email).
-  SnsTopicArn:
-    Type: String
-    Default: ''
-    Description: SNS topic ARN (required if EmailProvider= SNS).
   ArchiveEnabled:
     Type: String
     Default: 'true'
@@ -39,7 +28,7 @@ Parameters:
     Description: Enable S3 archival of daily JSON snapshots.
   ArchiveRetentionDays:
     Type: Number
-    Default: 90
+    Default: 30
     Description: Days to retain archived data in S3.
   BudgetSource:
     Type: String
@@ -65,10 +54,8 @@ Globals:
     Environment:
       Variables:
         PROJECT_NAME: !Ref ProjectName
-        EMAIL_PROVIDER: !Ref EmailProvider
         SENDER_EMAIL: !Ref SenderEmail
         RECIPIENT_EMAILS: !Ref RecipientEmails
-        SNS_TOPIC_ARN: !Ref SnsTopicArn
         ARCHIVE_ENABLED: !Ref ArchiveEnabled
         ARCHIVE_BUCKET: !If [UseArchive, !Ref ArchiveBucket, '']
         ARCHIVE_RETENTION_DAYS: !Ref ArchiveRetentionDays
@@ -102,11 +89,6 @@ Resources:
               Action:
                 - ses:SendEmail
                 - ses:SendRawEmail
-              Resource: '*'
-            - Sid: PublishSns
-              Effect: Allow
-              Action:
-                - sns:Publish
               Resource: '*'
             - !If
               - UseArchive
