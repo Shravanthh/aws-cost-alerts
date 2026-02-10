@@ -34,6 +34,10 @@ Parameters:
     Type: String
     Default: /aws-cost-alerts/budget-amount
     Description: SSM Parameter name holding the monthly budget amount.
+  TopServicesCount:
+    Type: Number
+    Default: 10
+    Description: Number of top services to include in the breakdown.
 
 Conditions:
   UseArchive: !Equals [!Ref ArchiveEnabled, 'true']
@@ -53,6 +57,7 @@ Globals:
         ARCHIVE_BUCKET: !If [UseArchive, !Ref ArchiveBucket, '']
         ARCHIVE_RETENTION_DAYS: !Ref ArchiveRetentionDays
         BUDGET_PARAM_NAME: !Ref BudgetParameterName
+        TOP_SERVICES_COUNT: !Ref TopServicesCount
 
 Resources:
   CostAlertFunction:
