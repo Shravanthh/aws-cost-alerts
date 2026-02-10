@@ -1,0 +1,161 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: AWS Cost Alert System (SAM)
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: aws-cost-alerts
+    Description: Base name used for resources.
+  ScheduleExpression:
+    Type: String
+    Default: cron(0 8 * * ? *)
+    Description: EventBridge schedule (defaults to 08:00 UTC daily).
+  SenderEmail:
+    Type: String
+    Default: ''
+    Description: SES-verified sender email (required for SES).
+  RecipientEmails:
+    Type: String
+    Default: ''
+    Description: Comma-separated recipient emails.
+  EmailProvider:
+    Type: String
+    Default: SES
+    AllowedValues:
+      - SES
+      - SNS
+    Description: Email provider (SES recommended for HTML email).
+  SnsTopicArn:
+    Type: String
+    Default: ''
+    Description: SNS topic ARN (required if EmailProvider= SNS).
+  ArchiveEnabled:
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Enable S3 archival of daily JSON snapshots.
+  ArchiveRetentionDays:
+    Type: Number
+    Default: 90
+    Description: Days to retain archived data in S3.
+  BudgetSource:
+    Type: String
+    Default: STATIC
+    AllowedValues:
+      - STATIC
+      - AWS_BUDGETS
+    Description: Where budget data comes from.
+  BudgetAmount:
+    Type: String
+    Default: ''
+    Description: Monthly budget amount (required when BudgetSource=STATIC).
+
+Conditions:
+  UseArchive: !Equals [!Ref ArchiveEnabled, 'true']
+
+Globals:
+  Function:
+    Runtime: python3.14
+    Timeout: 60
+    MemorySize: 1024
+    Tracing: Active
+    Environment:
+      Variables:
+        PROJECT_NAME: !Ref ProjectName
+        EMAIL_PROVIDER: !Ref EmailProvider
+        SENDER_EMAIL: !Ref SenderEmail
+        RECIPIENT_EMAILS: !Ref RecipientEmails
+        SNS_TOPIC_ARN: !Ref SnsTopicArn
+        ARCHIVE_ENABLED: !Ref ArchiveEnabled
+        ARCHIVE_BUCKET: !If [UseArchive, !Ref ArchiveBucket, '']
+        ARCHIVE_RETENTION_DAYS: !Ref ArchiveRetentionDays
+        BUDGET_SOURCE: !Ref BudgetSource
+        BUDGET_AMOUNT: !Ref BudgetAmount
+
+Resources:
+  CostAlertFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-daily'
+      CodeUri: src/
+      Handler: handler.lambda_handler
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Statement:
+            - Sid: CostExplorerRead
+              Effect: Allow
+              Action:
+                - ce:GetCostAndUsage
+                - ce:GetCostForecast
+                - ce:GetDimensionValues
+              Resource: '*'
+            - Sid: CloudWatchMetrics
+              Effect: Allow
+              Action:
+                - cloudwatch:PutMetricData
+              Resource: '*'
+            - Sid: SendSesEmail
+              Effect: Allow
+              Action:
+                - ses:SendEmail
+                - ses:SendRawEmail
+              Resource: '*'
+            - Sid: PublishSns
+              Effect: Allow
+              Action:
+                - sns:Publish
+              Resource: '*'
+            - !If
+              - UseArchive
+              - Sid: ArchiveWrite
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::${ArchiveBucket}/*'
+              - !Ref AWS::NoValue
+      Events:
+        DailySchedule:
+          Type: Schedule
+          Properties:
+            Schedule: !Ref ScheduleExpression
+            Name: !Sub '${ProjectName}-daily-schedule'
+            Description: Daily AWS cost alert schedule
+            Enabled: true
+
+  ArchiveBucket:
+    Type: AWS::S3::Bucket
+    Condition: UseArchive
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireCostAlerts
+            Status: Enabled
+            ExpirationInDays: !Ref ArchiveRetentionDays
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+Outputs:
+  FunctionName:
+    Description: Lambda function name
+    Value: !Ref CostAlertFunction
+  ScheduleExpression:
+    Description: EventBridge schedule
+    Value: !Ref ScheduleExpression
+  ArchiveBucketName:
+    Condition: UseArchive
+    Description: S3 bucket for archives
+    Value: !Ref ArchiveBucket
