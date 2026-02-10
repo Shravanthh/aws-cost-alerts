@@ -272,6 +272,30 @@ def _format_percentage(value):
     return f"{value:.1f}%"
 
 
+def _to_percent_value(value):
+    if value is None:
+        return 0.0
+    try:
+        percent = float(value)
+    except (TypeError, ValueError, InvalidOperation):
+        return 0.0
+    if percent < 0:
+        return 0.0
+    if percent > 100:
+        return 100.0
+    return percent
+
+
+def _build_percent_bar(value):
+    percent = _to_percent_value(value)
+    bar_width = f"{percent:.1f}%"
+    return (
+        "<div style=\"background:#eef1f5;border-radius:6px;overflow:hidden;height:8px;\">"
+        f"<div style=\"background:#4f8ef7;width:{bar_width};height:8px;\"></div>"
+        "</div>"
+    )
+
+
 def _build_service_breakdown_html(breakdown):
     if breakdown is None or not breakdown.get("services"):
         return "<p>No service data available.</p>"
@@ -289,6 +313,8 @@ def _build_service_breakdown_html(breakdown):
             f"{_format_currency(amount, unit)}</td>"
             f"<td style=\"padding:6px 8px;border-bottom:1px solid #e6e6e6;text-align:right;\">"
             f"{_format_percentage(percent)}</td>"
+            f"<td style=\"padding:6px 8px;border-bottom:1px solid #e6e6e6;\">"
+            f"{_build_percent_bar(percent)}</td>"
             "</tr>"
         )
 
@@ -299,6 +325,7 @@ def _build_service_breakdown_html(breakdown):
         "<th style=\"text-align:left;padding:6px 8px;border-bottom:2px solid #333;\">Service</th>"
         "<th style=\"text-align:right;padding:6px 8px;border-bottom:2px solid #333;\">Cost</th>"
         "<th style=\"text-align:right;padding:6px 8px;border-bottom:2px solid #333;\">% of Total</th>"
+        "<th style=\"text-align:left;padding:6px 8px;border-bottom:2px solid #333;\">Share</th>"
         "</tr>"
         "</thead>"
         "<tbody>"
