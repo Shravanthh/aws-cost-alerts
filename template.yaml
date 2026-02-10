@@ -36,7 +36,7 @@ Parameters:
     Description: Days to retain archived data in S3.
   BudgetParameterName:
     Type: String
-    Default: /aws-cost-alerts/budget-amount
+    Default: /cost-alerts/budget-amount
     Description: SSM Parameter name holding the monthly budget amount.
   TopServicesCount:
     Type: Number
