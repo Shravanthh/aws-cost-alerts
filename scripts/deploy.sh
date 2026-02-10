@@ -20,6 +20,7 @@ SENDER_EMAIL="${SENDER_EMAIL:-}"
 RECIPIENT_EMAILS="${RECIPIENT_EMAILS:-}"
 EMAIL_SUBJECT_PREFIX="${EMAIL_SUBJECT_PREFIX:-AWS Cost Alert}"
 BUDGET_PARAMETER_NAME="${BUDGET_PARAMETER_NAME:-/aws-cost-alerts/budget-amount}"
+BUDGET_DEFAULT_AMOUNT="${BUDGET_DEFAULT_AMOUNT:-10}"
 ARCHIVE_ENABLED="${ARCHIVE_ENABLED:-true}"
 ARCHIVE_RETENTION_DAYS="${ARCHIVE_RETENTION_DAYS:-30}"
 TOP_SERVICES_COUNT="${TOP_SERVICES_COUNT:-10}"
@@ -59,6 +60,14 @@ fi
 if ! aws "${aws_args[@]}" s3api head-bucket --bucket "$SAM_ARTIFACT_BUCKET" >/dev/null 2>&1; then
   echo "Creating SAM artifacts bucket: $SAM_ARTIFACT_BUCKET"
   aws "${aws_args[@]}" s3 mb "s3://${SAM_ARTIFACT_BUCKET}"
+fi
+
+if ! aws "${aws_args[@]}" ssm get-parameter --name "$BUDGET_PARAMETER_NAME" >/dev/null 2>&1; then
+  echo "Creating budget parameter: $BUDGET_PARAMETER_NAME (default $BUDGET_DEFAULT_AMOUNT)"
+  aws "${aws_args[@]}" ssm put-parameter \
+    --name "$BUDGET_PARAMETER_NAME" \
+    --type String \
+    --value "$BUDGET_DEFAULT_AMOUNT"
 fi
 
 sam build

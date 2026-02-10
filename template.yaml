@@ -152,13 +152,6 @@ Resources:
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
 
-  BudgetAmountParameter:
-    Type: AWS::SSM::Parameter
-    Properties:
-      Name: !Ref BudgetParameterName
-      Type: String
-      Value: '10'
-      Description: Monthly budget amount for AWS cost alerts.
 
 Outputs:
   FunctionName:
