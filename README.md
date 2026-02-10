@@ -22,7 +22,13 @@ sam build
 sam deploy --guided
 ```
 
-3. Example deploy with parameter overrides:
+3. Use the deployment script with a `.env` file:
+
+```bash
+./scripts/deploy.sh
+```
+
+4. Example deploy with parameter overrides:
 
 ```bash
 sam deploy \
