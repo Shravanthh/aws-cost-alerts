@@ -13,6 +13,7 @@ logger.setLevel(logging.INFO)
 
 _ssm_client = boto3.client("ssm")
 _ce_client = boto3.client("ce")
+_ses_client = boto3.client("ses")
 
 DEFAULT_METRIC = os.getenv("COST_METRIC", "UnblendedCost")
 DEFAULT_TOP_SERVICES = 10
@@ -495,6 +496,34 @@ def _build_email_content(
     return {"subject": subject, "html": html_body, "text": text_body}
 
 
+def _parse_recipient_emails(value):
+    if not value:
+        return []
+    return [email.strip() for email in value.split(",") if email.strip()]
+
+
+def _send_email_via_ses(subject, html_body, text_body):
+    sender = os.getenv("SENDER_EMAIL", "").strip()
+    recipients = _parse_recipient_emails(os.getenv("RECIPIENT_EMAILS", ""))
+    if not sender:
+        raise ValueError("SENDER_EMAIL is not configured.")
+    if not recipients:
+        raise ValueError("RECIPIENT_EMAILS is not configured.")
+
+    response = _ses_client.send_email(
+        Source=sender,
+        Destination={"ToAddresses": recipients},
+        Message={
+            "Subject": {"Data": subject, "Charset": "UTF-8"},
+            "Body": {
+                "Text": {"Data": text_body, "Charset": "UTF-8"},
+                "Html": {"Data": html_body, "Charset": "UTF-8"},
+            },
+        },
+    )
+    return response.get("MessageId")
+
+
 def lambda_handler(event, context):
     logger.info("Received event: %s", json.dumps(event))
 
@@ -521,6 +550,16 @@ def lambda_handler(event, context):
         today, month_to_date, forecast, previous_day, daily_costs, service_breakdown
     )
 
+    message_id = None
+    try:
+        message_id = _send_email_via_ses(
+            email_content["subject"],
+            email_content["html"],
+            email_content["text"],
+        )
+    except (ClientError, ValueError) as exc:
+        logger.error("Failed to send SES email: %s", exc)
+
     response = {
         "status": "ok",
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -534,6 +573,7 @@ def lambda_handler(event, context):
         "daily_costs": _stringify_daily_costs(daily_costs),
         "service_breakdown": _stringify_service_breakdown(service_breakdown),
         "email_preview": email_content,
+        "ses_message_id": message_id,
     }
 
     return {
