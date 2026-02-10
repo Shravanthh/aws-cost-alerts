@@ -30,17 +30,10 @@ Parameters:
     Type: Number
     Default: 30
     Description: Days to retain archived data in S3.
-  BudgetSource:
-    Type: String
-    Default: STATIC
-    AllowedValues:
-      - STATIC
-      - AWS_BUDGETS
-    Description: Where budget data comes from.
-  BudgetAmount:
+  BudgetParameterName:
     Type: String
     Default: ''
-    Description: Monthly budget amount (required when BudgetSource=STATIC).
+    Description: SSM Parameter name holding the monthly budget amount.
 
 Conditions:
   UseArchive: !Equals [!Ref ArchiveEnabled, 'true']
@@ -59,8 +52,7 @@ Globals:
         ARCHIVE_ENABLED: !Ref ArchiveEnabled
         ARCHIVE_BUCKET: !If [UseArchive, !Ref ArchiveBucket, '']
         ARCHIVE_RETENTION_DAYS: !Ref ArchiveRetentionDays
-        BUDGET_SOURCE: !Ref BudgetSource
-        BUDGET_AMOUNT: !Ref BudgetAmount
+        BUDGET_PARAM_NAME: !Ref BudgetParameterName
 
 Resources:
   CostAlertFunction:
@@ -78,6 +70,11 @@ Resources:
                 - ce:GetCostAndUsage
                 - ce:GetCostForecast
                 - ce:GetDimensionValues
+              Resource: '*'
+            - Sid: ParameterRead
+              Effect: Allow
+              Action:
+                - ssm:GetParameter
               Resource: '*'
             - Sid: CloudWatchMetrics
               Effect: Allow

@@ -14,6 +14,7 @@ def lambda_handler(event, context):
         "status": "ok",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "archive_enabled": os.getenv("ARCHIVE_ENABLED", "false"),
+        "budget_param_name": os.getenv("BUDGET_PARAM_NAME", ""),
     }
 
     return {
