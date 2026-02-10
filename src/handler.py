@@ -29,11 +29,19 @@ def _safe_call(label, fn, *args, default=None):
 def _collect_cost_data(today, cfg):
     """Fetch all cost data from Cost Explorer."""
     metric = cfg["metric"]
+
+    # Single call for MTD + previous day + daily trend (saves 2 API calls)
+    breakdown = _safe_call(
+        "get monthly breakdown",
+        cost_explorer.get_monthly_daily_breakdown, today, metric, cfg["trend_days"],
+        default={"month_to_date": None, "previous_day": None, "daily_costs": []},
+    )
+
     return {
-        "month_to_date": _safe_call("get MTD", cost_explorer.get_month_to_date, today, metric),
-        "previous_day": _safe_call("get previous day", cost_explorer.get_previous_day, today, metric),
+        "month_to_date": breakdown["month_to_date"],
+        "previous_day": breakdown["previous_day"],
+        "daily_costs": breakdown["daily_costs"],
         "forecast": _safe_call("get forecast", cost_explorer.get_forecast, today, metric),
-        "daily_costs": _safe_call("get daily costs", cost_explorer.get_daily_costs, today, metric, cfg["trend_days"], default=[]),
         "service_breakdown": _safe_call("get services", cost_explorer.get_service_breakdown, today, metric, cfg["top_services"]),
         "credit_info": _safe_call("get credits", cost_explorer.get_credit_usage, today, metric),
         "week_over_week": _safe_call("get WoW", cost_explorer.get_week_over_week, today, metric),

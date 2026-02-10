@@ -47,8 +47,48 @@ def _cost_result(start, end, total, unit):
     return {"start": start, "end": end, "amount": total, "unit": unit}
 
 
+def get_monthly_daily_breakdown(today, metric, trend_days):
+    """Single API call: daily granularity for the month. Derives MTD, previous day, and trend."""
+    start, end = _month_period(today)
+    if start == end:
+        return {
+            "month_to_date": _cost_result(start, end, Decimal("0"), "USD"),
+            "previous_day": _cost_result(start, end, Decimal("0"), "USD"),
+            "daily_costs": [],
+        }
+    resp = _ce.get_cost_and_usage(
+        TimePeriod={"Start": start, "End": end},
+        Granularity="DAILY",
+        Metrics=[metric],
+        Filter=EXCLUDE_RECORD_TYPES,
+    )
+    all_days, mtd_total, unit = [], Decimal("0"), None
+    for entry in resp.get("ResultsByTime", []):
+        info = entry.get("Total", {}).get(metric, {})
+        amount = _parse_amount(info.get("Amount"))
+        unit = info.get("Unit", unit)
+        if amount is not None:
+            mtd_total += amount
+            all_days.append({
+                "date": entry.get("TimePeriod", {}).get("Start"),
+                "amount": amount,
+                "unit": unit,
+            })
+
+    prev = all_days[-1] if all_days else {"amount": Decimal("0"), "unit": unit or "USD"}
+    trend = all_days[-trend_days:] if len(all_days) > trend_days else all_days
+
+    return {
+        "month_to_date": _cost_result(start, end, mtd_total, unit),
+        "previous_day": _cost_result(
+            prev.get("date", end), end, prev.get("amount", Decimal("0")), prev.get("unit", unit),
+        ),
+        "daily_costs": trend,
+    }
+
+
 def get_month_to_date(today, metric):
-    """Total cost for current month excluding credits."""
+    """Standalone MTD query — used by cost_monitor."""
     start, end = _month_period(today)
     if start == end:
         return _cost_result(start, end, Decimal("0"), "USD")
@@ -60,44 +100,6 @@ def get_month_to_date(today, metric):
     )
     total, unit = _sum_results(resp.get("ResultsByTime", []), metric)
     return _cost_result(start, end, total, unit)
-
-
-def get_previous_day(today, metric):
-    """Previous day cost excluding credits."""
-    start = (today - timedelta(days=1)).isoformat()
-    end = today.isoformat()
-    resp = _ce.get_cost_and_usage(
-        TimePeriod={"Start": start, "End": end},
-        Granularity="DAILY",
-        Metrics=[metric],
-        Filter=EXCLUDE_RECORD_TYPES,
-    )
-    total, unit = _sum_results(resp.get("ResultsByTime", []), metric)
-    return _cost_result(start, end, total, unit)
-
-
-def get_daily_costs(today, metric, days):
-    """Daily cost breakdown for the last N days excluding credits."""
-    start = (today - timedelta(days=days)).isoformat()
-    end = today.isoformat()
-    resp = _ce.get_cost_and_usage(
-        TimePeriod={"Start": start, "End": end},
-        Granularity="DAILY",
-        Metrics=[metric],
-        Filter=EXCLUDE_RECORD_TYPES,
-    )
-    costs, unit = [], None
-    for entry in resp.get("ResultsByTime", []):
-        info = entry.get("Total", {}).get(metric, {})
-        amount = _parse_amount(info.get("Amount"))
-        unit = info.get("Unit", unit)
-        if amount is not None:
-            costs.append({
-                "date": entry.get("TimePeriod", {}).get("Start"),
-                "amount": amount,
-                "unit": unit,
-            })
-    return costs
 
 
 def get_credit_usage(today, metric):
