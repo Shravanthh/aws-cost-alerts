@@ -19,6 +19,10 @@ Parameters:
     Type: String
     Default: ''
     Description: Comma-separated recipient emails.
+  EmailSubjectPrefix:
+    Type: String
+    Default: AWS Cost Alert
+    Description: Prefix used for email subject lines.
   ArchiveEnabled:
     Type: String
     Default: 'true'
@@ -53,6 +57,7 @@ Globals:
         PROJECT_NAME: !Ref ProjectName
         SENDER_EMAIL: !Ref SenderEmail
         RECIPIENT_EMAILS: !Ref RecipientEmails
+        EMAIL_SUBJECT_PREFIX: !Ref EmailSubjectPrefix
         ARCHIVE_ENABLED: !Ref ArchiveEnabled
         ARCHIVE_BUCKET: !If [UseArchive, !Ref ArchiveBucket, '']
         ARCHIVE_RETENTION_DAYS: !Ref ArchiveRetentionDays

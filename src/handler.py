@@ -3,6 +3,7 @@ import logging
 import os
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from html import escape
 
 import boto3
 from botocore.exceptions import ClientError
@@ -15,6 +16,7 @@ _ce_client = boto3.client("ce")
 
 DEFAULT_METRIC = os.getenv("COST_METRIC", "UnblendedCost")
 DEFAULT_TOP_SERVICES = 10
+DEFAULT_SUBJECT_PREFIX = os.getenv("EMAIL_SUBJECT_PREFIX", "AWS Cost Alert")
 FORECAST_METRIC_MAP = {
     "UnblendedCost": "UNBLENDED_COST",
     "BlendedCost": "BLENDED_COST",
@@ -256,6 +258,114 @@ def _stringify_service_breakdown(payload):
     return formatted
 
 
+def _format_currency(amount, unit):
+    if amount is None:
+        return "N/A"
+    if unit == "USD":
+        return f"${amount:.2f}"
+    return f"{amount:.2f} {unit}" if unit else f"{amount:.2f}"
+
+
+def _format_percentage(value):
+    if value is None:
+        return "N/A"
+    return f"{value:.1f}%"
+
+
+def _build_service_breakdown_html(breakdown):
+    if breakdown is None or not breakdown.get("services"):
+        return "<p>No service data available.</p>"
+
+    rows = []
+    for entry in breakdown["services"]:
+        service_name = escape(entry.get("service", "Unknown"))
+        amount = entry.get("amount")
+        unit = entry.get("unit")
+        percent = entry.get("percent_of_total")
+        rows.append(
+            "<tr>"
+            f"<td style=\"padding:6px 8px;border-bottom:1px solid #e6e6e6;\">{service_name}</td>"
+            f"<td style=\"padding:6px 8px;border-bottom:1px solid #e6e6e6;text-align:right;\">"
+            f"{_format_currency(amount, unit)}</td>"
+            f"<td style=\"padding:6px 8px;border-bottom:1px solid #e6e6e6;text-align:right;\">"
+            f"{_format_percentage(percent)}</td>"
+            "</tr>"
+        )
+
+    return (
+        "<table style=\"width:100%;border-collapse:collapse;font-size:14px;\">"
+        "<thead>"
+        "<tr>"
+        "<th style=\"text-align:left;padding:6px 8px;border-bottom:2px solid #333;\">Service</th>"
+        "<th style=\"text-align:right;padding:6px 8px;border-bottom:2px solid #333;\">Cost</th>"
+        "<th style=\"text-align:right;padding:6px 8px;border-bottom:2px solid #333;\">% of Total</th>"
+        "</tr>"
+        "</thead>"
+        "<tbody>"
+        f"{''.join(rows)}"
+        "</tbody>"
+        "</table>"
+    )
+
+
+def _build_service_breakdown_text(breakdown):
+    if breakdown is None or not breakdown.get("services"):
+        return "No service data available."
+
+    lines = ["Service Breakdown:"]
+    for entry in breakdown["services"]:
+        service_name = entry.get("service", "Unknown")
+        amount = entry.get("amount")
+        unit = entry.get("unit")
+        percent = entry.get("percent_of_total")
+        lines.append(
+            f"- {service_name}: {_format_currency(amount, unit)} "
+            f"({_format_percentage(percent)})"
+        )
+    return "\n".join(lines)
+
+
+def _build_email_content(report_date, month_to_date, forecast, previous_day, service_breakdown):
+    subject = f"{DEFAULT_SUBJECT_PREFIX} - {report_date.isoformat()}"
+
+    mtd_amount = _format_currency(month_to_date.get("amount"), month_to_date.get("unit")) if month_to_date else "N/A"
+    forecast_amount = (
+        _format_currency(forecast.get("amount"), forecast.get("unit")) if forecast else "N/A"
+    )
+    previous_day_amount = (
+        _format_currency(previous_day.get("amount"), previous_day.get("unit")) if previous_day else "N/A"
+    )
+
+    html_body = (
+        "<html><body style=\"font-family:Arial, sans-serif;color:#111;\">"
+        f"<h2 style=\"margin-bottom:8px;\">AWS Cost Report - {report_date.isoformat()}</h2>"
+        "<p style=\"margin-top:0;\">Daily cost summary and service breakdown.</p>"
+        "<h3 style=\"margin-bottom:6px;\">Summary</h3>"
+        "<ul style=\"padding-left:18px;\">"
+        f"<li>Month-to-date: <strong>{mtd_amount}</strong></li>"
+        f"<li>Yesterday: <strong>{previous_day_amount}</strong></li>"
+        f"<li>Forecast: <strong>{forecast_amount}</strong></li>"
+        "</ul>"
+        "<h3 style=\"margin-bottom:6px;\">Top Services</h3>"
+        f"{_build_service_breakdown_html(service_breakdown)}"
+        "</body></html>"
+    )
+
+    text_body = "\n".join(
+        [
+            f"AWS Cost Report - {report_date.isoformat()}",
+            "",
+            f"Month-to-date: {mtd_amount}",
+            f"Yesterday: {previous_day_amount}",
+            f"Forecast: {forecast_amount}",
+            "",
+            _build_service_breakdown_text(service_breakdown),
+        ]
+    )
+
+    return {"subject": subject, "html": html_body, "text": text_body}
+
+
 def lambda_handler(event, context):
     logger.info("Received event: %s", json.dumps(event))
 
@@ -275,6 +385,10 @@ def lambda_handler(event, context):
         forecast = None
         service_breakdown = None
 
+    email_content = _build_email_content(
+        today, month_to_date, forecast, previous_day, service_breakdown
+    )
+
     response = {
         "status": "ok",
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -286,6 +400,7 @@ def lambda_handler(event, context):
         "previous_day": _stringify_cost_payload(previous_day),
         "forecast": _stringify_cost_payload(forecast),
         "service_breakdown": _stringify_service_breakdown(service_breakdown),
+        "email_preview": email_content,
     }
 
     return {
