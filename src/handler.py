@@ -1,781 +1,148 @@
+"""Lambda handler — orchestrates cost data collection, alerting, email, and archival."""
+
 import json
 import logging
-import os
-from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
-from html import escape
+from datetime import date, datetime, timezone
+from decimal import Decimal
 
-import boto3
 from botocore.exceptions import ClientError
+
+import alerts
+import archive
+import config
+import cost_explorer
+import email_builder
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-_ssm_client = boto3.client("ssm")
-_ce_client = boto3.client("ce")
-_ses_client = boto3.client("ses")
-_s3_client = boto3.client("s3")
 
-DEFAULT_METRIC = os.getenv("COST_METRIC", "UnblendedCost")
-DEFAULT_TOP_SERVICES = 10
-DEFAULT_TREND_DAYS = 7
-DEFAULT_SUBJECT_PREFIX = os.getenv("EMAIL_SUBJECT_PREFIX", "AWS Cost Alert")
-DEFAULT_ANOMALY_THRESHOLD_PERCENT = Decimal("30")
-DEFAULT_BUDGET_THRESHOLDS = (Decimal("50"), Decimal("75"), Decimal("90"), Decimal("100"))
-FORECAST_METRIC_MAP = {
-    "UnblendedCost": "UNBLENDED_COST",
-    "BlendedCost": "BLENDED_COST",
-    "AmortizedCost": "AMORTIZED_COST",
-    "NetAmortizedCost": "NET_AMORTIZED_COST",
-    "NetUnblendedCost": "NET_UNBLENDED_COST",
-}
-
-
-def _get_budget_amount():
-    param_name = os.getenv("BUDGET_PARAM_NAME", "").strip()
-    if not param_name:
-        logger.warning("BUDGET_PARAM_NAME is not set.")
-        return None
-
+def _safe_call(label, fn, *args, default=None):
+    """Call fn(*args), log and return default on ClientError."""
     try:
-        response = _ssm_client.get_parameter(Name=param_name, WithDecryption=False)
+        return fn(*args)
     except ClientError as exc:
-        logger.error("Failed to read SSM parameter %s: %s", param_name, exc)
-        return None
-
-    raw_value = response.get("Parameter", {}).get("Value", "")
-    if raw_value == "":
-        logger.warning("SSM parameter %s is empty.", param_name)
-        return None
-
-    try:
-        return Decimal(raw_value)
-    except InvalidOperation:
-        logger.error("SSM parameter %s is not a valid number: %r", param_name, raw_value)
-        return None
-
-
-def _get_int_env(name, default):
-    raw_value = os.getenv(name)
-    if raw_value is None or raw_value.strip() == "":
+        logger.error("Failed to %s: %s", label, exc)
         return default
-    try:
-        parsed = int(raw_value)
-    except ValueError:
-        logger.warning("Invalid %s value %r; using default %s.", name, raw_value, default)
-        return default
-    if parsed <= 0:
-        logger.warning("Invalid %s value %r; using default %s.", name, raw_value, default)
-        return default
-    return parsed
 
 
-def _get_decimal_env(name, default):
-    raw_value = os.getenv(name)
-    if raw_value is None or raw_value.strip() == "":
-        return default
-    try:
-        parsed = Decimal(raw_value.strip())
-    except InvalidOperation:
-        logger.warning("Invalid %s value %r; using default %s.", name, raw_value, default)
-        return default
-    if parsed <= 0:
-        logger.warning("Invalid %s value %r; using default %s.", name, raw_value, default)
-        return default
-    return parsed
-
-
-def _get_thresholds_env(name, default):
-    raw_value = os.getenv(name)
-    if raw_value is None or raw_value.strip() == "":
-        return default
-    thresholds = []
-    for item in raw_value.split(","):
-        value = item.strip()
-        if not value:
-            continue
-        try:
-            parsed = Decimal(value)
-        except InvalidOperation:
-            logger.warning("Invalid threshold value %r in %s.", value, name)
-            continue
-        if parsed <= 0:
-            logger.warning("Invalid threshold value %r in %s.", value, name)
-            continue
-        thresholds.append(parsed)
-    if not thresholds:
-        return default
-    return tuple(sorted(set(thresholds)))
-
-
-def _sum_cost_and_usage(results, metric):
-    total = Decimal("0")
-    unit = None
-    for entry in results:
-        cost_info = entry.get("Total", {}).get(metric, {})
-        amount = cost_info.get("Amount")
-        unit = cost_info.get("Unit", unit)
-        if amount is None:
-            continue
-        try:
-            total += Decimal(amount)
-        except InvalidOperation:
-            logger.warning("Invalid cost amount encountered: %r", amount)
-    return total, unit
-
-
-def _get_month_time_period(today):
-    start_date = today.replace(day=1)
-    end_date = today
-    if end_date <= start_date:
-        end_date = start_date + timedelta(days=1)
-    return start_date.isoformat(), end_date.isoformat()
-
-
-def _get_month_to_date_cost(today, metric):
-    start, end = _get_month_time_period(today)
-    response = _ce_client.get_cost_and_usage(
-        TimePeriod={"Start": start, "End": end},
-        Granularity="MONTHLY",
-        Metrics=[metric],
-    )
-    results = response.get("ResultsByTime", [])
-    total, unit = _sum_cost_and_usage(results, metric)
+def _collect_cost_data(today, cfg):
+    """Fetch all cost data from Cost Explorer."""
+    metric = cfg["metric"]
     return {
-        "start": start,
-        "end": end,
-        "amount": total,
-        "unit": unit,
+        "month_to_date": _safe_call("get MTD", cost_explorer.get_month_to_date, today, metric),
+        "previous_day": _safe_call("get previous day", cost_explorer.get_previous_day, today, metric),
+        "forecast": _safe_call("get forecast", cost_explorer.get_forecast, today, metric),
+        "daily_costs": _safe_call("get daily costs", cost_explorer.get_daily_costs, today, metric, cfg["trend_days"], default=[]),
+        "service_breakdown": _safe_call("get services", cost_explorer.get_service_breakdown, today, metric, cfg["top_services"]),
+        "credit_info": _safe_call("get credits", cost_explorer.get_credit_usage, today, metric),
+        "week_over_week": _safe_call("get WoW", cost_explorer.get_week_over_week, today, metric),
+        "credit_daily_history": _safe_call("get credit history", cost_explorer.get_credit_daily_history, today, metric, default=[]),
     }
 
 
-def _get_service_breakdown(today, metric, max_services):
-    start, end = _get_month_time_period(today)
-    groups = []
-    next_token = None
-    while True:
-        request = {
-            "TimePeriod": {"Start": start, "End": end},
-            "Granularity": "MONTHLY",
-            "Metrics": [metric],
-            "GroupBy": [{"Type": "DIMENSION", "Key": "SERVICE"}],
-        }
-        if next_token:
-            request["NextPageToken"] = next_token
-        response = _ce_client.get_cost_and_usage(**request)
-        results = response.get("ResultsByTime", [])
-        if results:
-            groups.extend(results[0].get("Groups", []))
-        next_token = response.get("NextPageToken")
-        if not next_token:
-            break
+def _estimate_credit_exhaustion(today, data):
+    """Estimate when credits will run out based on daily burn rate."""
+    credit_info = data.get("credit_info")
+    daily_history = data.get("credit_daily_history", [])
+    if not credit_info or not daily_history:
+        return None
 
-    if not groups:
-        return {"start": start, "end": end, "total": Decimal("0"), "unit": None, "services": []}
-    services = []
-    total = Decimal("0")
-    unit = None
-    for group in groups:
-        keys = group.get("Keys", [])
-        service_name = keys[0] if keys else "Unknown"
-        cost_info = group.get("Metrics", {}).get(metric, {})
-        amount = cost_info.get("Amount")
-        unit = cost_info.get("Unit", unit)
-        if amount is None:
-            continue
-        try:
-            amount_value = Decimal(amount)
-        except InvalidOperation:
-            logger.warning("Invalid service amount for %s: %r", service_name, amount)
-            continue
-        total += amount_value
-        services.append(
-            {
-                "service": service_name,
-                "amount": amount_value,
-                "unit": unit,
-            }
-        )
+    credits_used = credit_info.get("credits_used", Decimal("0"))
+    if credits_used <= 0:
+        return None
 
-    services.sort(key=lambda item: item["amount"], reverse=True)
-    top_services = services[:max_services]
-    if total > 0:
-        for entry in top_services:
-            entry["percent_of_total"] = (entry["amount"] / total) * Decimal("100")
-    else:
-        for entry in top_services:
-            entry["percent_of_total"] = Decimal("0")
+    avg_daily = sum(daily_history) / len(daily_history)
+    if avg_daily <= 0:
+        return None
+
+    month_start = today.replace(day=1)
+    month_end = date(today.year + 1, 1, 1) if today.month == 12 else date(today.year, today.month + 1, 1)
+    days_in_month = (month_end - month_start).days
+    days_elapsed = (today - month_start).days or 1
 
     return {
-        "start": start,
-        "end": end,
-        "total": total,
-        "unit": unit,
-        "services": top_services,
+        "avg_daily_burn": avg_daily,
+        "credits_used_so_far": credits_used,
+        "projected_monthly_credits": avg_daily * days_in_month,
+        "days_elapsed": days_elapsed,
+        "days_remaining": days_in_month - days_elapsed,
+        "unit": credit_info.get("unit", "USD"),
     }
 
 
-def _get_previous_day_cost(today, metric):
-    start_date = today - timedelta(days=1)
-    start = start_date.isoformat()
-    end = today.isoformat()
-    response = _ce_client.get_cost_and_usage(
-        TimePeriod={"Start": start, "End": end},
-        Granularity="DAILY",
-        Metrics=[metric],
-    )
-    results = response.get("ResultsByTime", [])
-    total, unit = _sum_cost_and_usage(results, metric)
-    return {
-        "start": start,
-        "end": end,
-        "amount": total,
-        "unit": unit,
-    }
+def _compute_alerts(data, cfg):
+    """Run all alert checks."""
+    result = []
+    mtd = data.get("month_to_date")
+    credit_info = data.get("credit_info")
+    credits_used = credit_info.get("credits_used", Decimal("0")) if credit_info else Decimal("0")
+
+    if mtd:
+        result.extend(alerts.check_budget_thresholds(
+            mtd.get("amount"), cfg["budget_amount"], cfg["budget_thresholds"], credits_used,
+        ))
+
+    anomaly = alerts.check_daily_anomaly(data.get("daily_costs", []), cfg["anomaly_threshold"])
+    if anomaly:
+        result.append(anomaly)
+
+    return result
 
 
-def _get_daily_costs(today, metric, days):
-    start_date = today - timedelta(days=days)
-    start = start_date.isoformat()
-    end = today.isoformat()
-    response = _ce_client.get_cost_and_usage(
-        TimePeriod={"Start": start, "End": end},
-        Granularity="DAILY",
-        Metrics=[metric],
-    )
-    results = response.get("ResultsByTime", [])
-    daily_costs = []
-    unit = None
-    for entry in results:
-        cost_info = entry.get("Total", {}).get(metric, {})
-        amount = cost_info.get("Amount")
-        unit = cost_info.get("Unit", unit)
-        if amount is None:
-            continue
-        try:
-            amount_value = Decimal(amount)
-        except InvalidOperation:
-            logger.warning("Invalid daily cost amount encountered: %r", amount)
-            continue
-        daily_costs.append(
-            {
-                "date": entry.get("TimePeriod", {}).get("Start"),
-                "amount": amount_value,
-                "unit": unit,
-            }
-        )
-    return daily_costs
-
-
-def _get_month_end(today):
-    if today.month == 12:
-        return date(today.year + 1, 1, 1)
-    return date(today.year, today.month + 1, 1)
-
-
-def _get_forecast_cost(today, metric):
-    start = today.isoformat()
-    end = _get_month_end(today).isoformat()
-    forecast_metric = FORECAST_METRIC_MAP.get(metric, "UNBLENDED_COST")
-    response = _ce_client.get_cost_forecast(
-        TimePeriod={"Start": start, "End": end},
-        Metric=forecast_metric,
-        Granularity="MONTHLY",
-    )
-    total = response.get("Total", {})
-    amount = total.get("Amount")
-    unit = total.get("Unit")
-    lower = response.get("PredictionIntervalLowerBound")
-    upper = response.get("PredictionIntervalUpperBound")
-    return {
-        "start": start,
-        "end": end,
-        "amount": Decimal(amount) if amount is not None else None,
-        "unit": unit,
-        "prediction_interval": {
-            "lower": Decimal(lower) if lower is not None else None,
-            "upper": Decimal(upper) if upper is not None else None,
-        },
-    }
-
-
-def _stringify_cost_payload(payload):
-    if payload is None:
-        return None
-    formatted = payload.copy()
-    if isinstance(formatted.get("amount"), Decimal):
-        formatted["amount"] = str(formatted["amount"])
-    prediction = formatted.get("prediction_interval")
-    if isinstance(prediction, dict):
-        lower = prediction.get("lower")
-        upper = prediction.get("upper")
-        if isinstance(lower, Decimal):
-            prediction["lower"] = str(lower)
-        if isinstance(upper, Decimal):
-            prediction["upper"] = str(upper)
-    return formatted
-
-
-def _stringify_service_breakdown(payload):
-    if payload is None:
-        return None
-    formatted = payload.copy()
-    if isinstance(formatted.get("total"), Decimal):
-        formatted["total"] = str(formatted["total"])
-    services = []
-    for entry in formatted.get("services", []):
-        service_entry = entry.copy()
-        if isinstance(service_entry.get("amount"), Decimal):
-            service_entry["amount"] = str(service_entry["amount"])
-        if isinstance(service_entry.get("percent_of_total"), Decimal):
-            service_entry["percent_of_total"] = str(service_entry["percent_of_total"])
-        services.append(service_entry)
-    formatted["services"] = services
-    return formatted
-
-
-def _calculate_budget_alerts(month_to_date, budget_amount, thresholds):
-    if not month_to_date or budget_amount is None or budget_amount <= 0:
-        return []
-    mtd_amount = month_to_date.get("amount")
-    if not isinstance(mtd_amount, Decimal):
-        return []
-    percent_used = (mtd_amount / budget_amount) * Decimal("100")
-    alerts = []
-    for threshold in thresholds:
-        if percent_used >= threshold:
-            alerts.append(
-                {
-                    "type": "BUDGET_THRESHOLD",
-                    "threshold_percent": threshold,
-                    "percent_used": percent_used,
-                }
-            )
-    return alerts
-
-
-def _calculate_daily_anomaly(daily_costs, threshold_percent):
-    if not daily_costs or len(daily_costs) < 2:
-        return None
-    latest = daily_costs[-1]
-    history = daily_costs[:-1]
-    total = Decimal("0")
-    count = 0
-    for entry in history:
-        amount = entry.get("amount")
-        if isinstance(amount, Decimal):
-            total += amount
-            count += 1
-    if count == 0:
-        return None
-    average = total / Decimal(count)
-    latest_amount = latest.get("amount")
-    if not isinstance(latest_amount, Decimal):
-        return None
-    if average == 0:
-        return None
-    percent_over = ((latest_amount - average) / average) * Decimal("100")
-    if percent_over >= threshold_percent:
-        return {
-            "type": "DAILY_ANOMALY",
-            "date": latest.get("date"),
-            "amount": latest_amount,
-            "average": average,
-            "percent_over_average": percent_over,
-            "threshold_percent": threshold_percent,
-        }
-    return None
-
-
-def _stringify_daily_costs(daily_costs):
-    formatted = []
-    for entry in daily_costs or []:
-        formatted.append(
-            {
-                "date": entry.get("date"),
-                "amount": str(entry.get("amount")) if isinstance(entry.get("amount"), Decimal) else entry.get("amount"),
-                "unit": entry.get("unit"),
-            }
-        )
-    return formatted
-
-
-def _stringify_alerts(alerts):
-    formatted = []
-    for alert in alerts or []:
-        entry = alert.copy()
-        for key in ("threshold_percent", "percent_used", "percent_over_average"):
-            value = entry.get(key)
-            if isinstance(value, Decimal):
-                entry[key] = str(value)
-        for key in ("amount", "average"):
-            value = entry.get(key)
-            if isinstance(value, Decimal):
-                entry[key] = str(value)
-        formatted.append(entry)
-    return formatted
-
-
-def _format_currency(amount, unit):
-    if amount is None:
-        return "N/A"
-    if unit == "USD":
-        return f"${amount:.2f}"
-    return f"{amount:.2f} {unit}" if unit else f"{amount:.2f}"
-
-
-def _format_percentage(value):
-    if value is None:
-        return "N/A"
-    return f"{value:.1f}%"
-
-
-def _to_percent_value(value):
-    if value is None:
-        return 0.0
+def _send_report(email_content, cfg):
+    """Send email, return (message_id, error)."""
     try:
-        percent = float(value)
-    except (TypeError, ValueError, InvalidOperation):
-        return 0.0
-    if percent < 0:
-        return 0.0
-    if percent > 100:
-        return 100.0
-    return percent
-
-
-def _build_percent_bar(value):
-    percent = _to_percent_value(value)
-    bar_width = f"{percent:.1f}%"
-    return (
-        "<div style=\"background:#eef1f5;border-radius:6px;overflow:hidden;height:8px;\">"
-        f"<div style=\"background:#4f8ef7;width:{bar_width};height:8px;\"></div>"
-        "</div>"
-    )
-
-
-def _build_service_breakdown_html(breakdown):
-    if breakdown is None or not breakdown.get("services"):
-        return "<p>No service data available.</p>"
-
-    rows = []
-    for entry in breakdown["services"]:
-        service_name = escape(entry.get("service", "Unknown"))
-        amount = entry.get("amount")
-        unit = entry.get("unit")
-        percent = entry.get("percent_of_total")
-        rows.append(
-            "<tr>"
-            f"<td style=\"padding:6px 8px;border-bottom:1px solid #e6e6e6;\">{service_name}</td>"
-            f"<td style=\"padding:6px 8px;border-bottom:1px solid #e6e6e6;text-align:right;\">"
-            f"{_format_currency(amount, unit)}</td>"
-            f"<td style=\"padding:6px 8px;border-bottom:1px solid #e6e6e6;text-align:right;\">"
-            f"{_format_percentage(percent)}</td>"
-            f"<td style=\"padding:6px 8px;border-bottom:1px solid #e6e6e6;\">"
-            f"{_build_percent_bar(percent)}</td>"
-            "</tr>"
-        )
-
-    return (
-        "<table style=\"width:100%;border-collapse:collapse;font-size:14px;\">"
-        "<thead>"
-        "<tr>"
-        "<th style=\"text-align:left;padding:6px 8px;border-bottom:2px solid #333;\">Service</th>"
-        "<th style=\"text-align:right;padding:6px 8px;border-bottom:2px solid #333;\">Cost</th>"
-        "<th style=\"text-align:right;padding:6px 8px;border-bottom:2px solid #333;\">% of Total</th>"
-        "<th style=\"text-align:left;padding:6px 8px;border-bottom:2px solid #333;\">Share</th>"
-        "</tr>"
-        "</thead>"
-        "<tbody>"
-        f"{''.join(rows)}"
-        "</tbody>"
-        "</table>"
-    )
-
-
-def _build_service_breakdown_text(breakdown):
-    if breakdown is None or not breakdown.get("services"):
-        return "No service data available."
-
-    lines = ["Service Breakdown:"]
-    for entry in breakdown["services"]:
-        service_name = entry.get("service", "Unknown")
-        amount = entry.get("amount")
-        unit = entry.get("unit")
-        percent = entry.get("percent_of_total")
-        lines.append(
-            f"- {service_name}: {_format_currency(amount, unit)} "
-            f"({_format_percentage(percent)})"
-        )
-    return "\n".join(lines)
-
-
-def _build_daily_trend_html(daily_costs):
-    if not daily_costs:
-        return "<p>No daily trend data available.</p>"
-
-    max_amount = max((entry["amount"] for entry in daily_costs), default=Decimal("0"))
-    max_height = 60
-    bars = []
-    for entry in daily_costs:
-        amount = entry.get("amount", Decimal("0"))
-        date_label = entry.get("date", "")[-5:] if entry.get("date") else ""
-        if max_amount > 0:
-            bar_height = int((amount / max_amount) * max_height)
-            if amount > 0 and bar_height < 2:
-                bar_height = 2
-        else:
-            bar_height = 0
-        top_padding = max_height - bar_height
-        bars.append(
-            "<td style=\"vertical-align:bottom;padding:0 4px;\">"
-            "<table role=\"presentation\" style=\"border-collapse:collapse;margin:0 auto;\">"
-            f"<tr><td style=\"height:{top_padding}px;width:18px;\"></td></tr>"
-            f"<tr><td style=\"height:{bar_height}px;width:18px;background:#4f8ef7;border-radius:3px;\"></td></tr>"
-            "</table>"
-            f"<div style=\"text-align:center;font-size:11px;color:#666;margin-top:4px;\">"
-            f"{escape(date_label)}</div>"
-            "</td>"
-        )
-
-    return (
-        "<table role=\"presentation\" style=\"width:100%;border-collapse:collapse;\">"
-        "<tr>"
-        f"{''.join(bars)}"
-        "</tr>"
-        "</table>"
-    )
-
-
-def _build_daily_trend_text(daily_costs):
-    if not daily_costs:
-        return "No daily trend data available."
-    lines = ["Daily Trend (most recent days):"]
-    for entry in daily_costs:
-        date_label = entry.get("date", "")
-        amount = entry.get("amount")
-        unit = entry.get("unit")
-        lines.append(f"- {date_label}: {_format_currency(amount, unit)}")
-    return "\n".join(lines)
-
-
-def _build_email_content(
-    report_date,
-    month_to_date,
-    forecast,
-    previous_day,
-    daily_costs,
-    service_breakdown,
-    alerts,
-):
-    subject = f"{DEFAULT_SUBJECT_PREFIX} - {report_date.isoformat()}"
-
-    mtd_amount = _format_currency(month_to_date.get("amount"), month_to_date.get("unit")) if month_to_date else "N/A"
-    forecast_amount = (
-        _format_currency(forecast.get("amount"), forecast.get("unit")) if forecast else "N/A"
-    )
-    previous_day_amount = (
-        _format_currency(previous_day.get("amount"), previous_day.get("unit")) if previous_day else "N/A"
-    )
-
-    alert_html = ""
-    alert_text = ""
-    if alerts:
-        alert_items = []
-        alert_lines = []
-        for alert in alerts:
-            if alert.get("type") == "BUDGET_THRESHOLD":
-                threshold = alert.get("threshold_percent")
-                used = alert.get("percent_used")
-                alert_items.append(
-                    f"<li>Budget usage at {_format_percentage(used)} "
-                    f"(threshold {_format_percentage(threshold)})</li>"
-                )
-                alert_lines.append(
-                    f"- Budget usage at {_format_percentage(used)} "
-                    f"(threshold {_format_percentage(threshold)})"
-                )
-            elif alert.get("type") == "DAILY_ANOMALY":
-                percent_over = alert.get("percent_over_average")
-                alert_items.append(
-                    f"<li>Daily cost anomaly: {_format_percentage(percent_over)} "
-                    "above 7-day average.</li>"
-                )
-                alert_lines.append(
-                    f"- Daily cost anomaly: {_format_percentage(percent_over)} "
-                    "above 7-day average."
-                )
-        if alert_items:
-            alert_html = (
-                "<h3 style=\"margin-bottom:6px;\">Alerts</h3>"
-                "<ul style=\"padding-left:18px;color:#b00020;\">"
-                f"{''.join(alert_items)}"
-                "</ul>"
-            )
-        if alert_lines:
-            alert_text = "Alerts:\n" + "\n".join(alert_lines)
-
-    html_body = (
-        "<html><body style=\"font-family:Arial, sans-serif;color:#111;\">"
-        f"<h2 style=\"margin-bottom:8px;\">AWS Cost Report - {report_date.isoformat()}</h2>"
-        "<p style=\"margin-top:0;\">Daily cost summary and service breakdown.</p>"
-        f"{alert_html}"
-        "<h3 style=\"margin-bottom:6px;\">Summary</h3>"
-        "<ul style=\"padding-left:18px;\">"
-        f"<li>Month-to-date: <strong>{mtd_amount}</strong></li>"
-        f"<li>Yesterday: <strong>{previous_day_amount}</strong></li>"
-        f"<li>Forecast: <strong>{forecast_amount}</strong></li>"
-        "</ul>"
-        "<h3 style=\"margin-bottom:6px;\">Daily Trend</h3>"
-        f"{_build_daily_trend_html(daily_costs)}"
-        "<h3 style=\"margin-bottom:6px;\">Top Services</h3>"
-        f"{_build_service_breakdown_html(service_breakdown)}"
-        "</body></html>"
-    )
-
-    text_body = "\n".join(
-        [
-            f"AWS Cost Report - {report_date.isoformat()}",
-            "",
-            alert_text,
-            "" if alert_text else "",
-            f"Month-to-date: {mtd_amount}",
-            f"Yesterday: {previous_day_amount}",
-            f"Forecast: {forecast_amount}",
-            "",
-            _build_daily_trend_text(daily_costs),
-            "",
-            _build_service_breakdown_text(service_breakdown),
-        ]
-    )
-
-    return {"subject": subject, "html": html_body, "text": text_body}
-
-
-def _parse_recipient_emails(value):
-    if not value:
-        return []
-    return [email.strip() for email in value.split(",") if email.strip()]
-
-
-def _send_email_via_ses(subject, html_body, text_body):
-    sender = os.getenv("SENDER_EMAIL", "").strip()
-    recipients = _parse_recipient_emails(os.getenv("RECIPIENT_EMAILS", ""))
-    if not sender:
-        raise ValueError("SENDER_EMAIL is not configured.")
-    if not recipients:
-        raise ValueError("RECIPIENT_EMAILS is not configured.")
-
-    response = _ses_client.send_email(
-        Source=sender,
-        Destination={"ToAddresses": recipients},
-        Message={
-            "Subject": {"Data": subject, "Charset": "UTF-8"},
-            "Body": {
-                "Text": {"Data": text_body, "Charset": "UTF-8"},
-                "Html": {"Data": html_body, "Charset": "UTF-8"},
-            },
-        },
-    )
-    return response.get("MessageId")
-
-
-def _archive_report(report, report_date):
-    if os.getenv("ARCHIVE_ENABLED", "false").lower() != "true":
-        return None
-    bucket = os.getenv("ARCHIVE_BUCKET", "").strip()
-    if not bucket:
-        logger.warning("ARCHIVE_BUCKET is not configured.")
-        return None
-    key = f"reports/{report_date.isoformat()}.json"
-    payload = json.dumps(report, indent=2)
-    _s3_client.put_object(
-        Bucket=bucket,
-        Key=key,
-        Body=payload.encode("utf-8"),
-        ContentType="application/json",
-    )
-    return key
-
-
-def lambda_handler(event, context):
-    logger.info("Received event: %s", json.dumps(event))
-
-    budget_amount = _get_budget_amount()
-    today = datetime.now(timezone.utc).date()
-    top_services_count = _get_int_env("TOP_SERVICES_COUNT", DEFAULT_TOP_SERVICES)
-    trend_days = _get_int_env("TREND_DAYS", DEFAULT_TREND_DAYS)
-    anomaly_threshold = _get_decimal_env(
-        "ANOMALY_THRESHOLD_PERCENT", DEFAULT_ANOMALY_THRESHOLD_PERCENT
-    )
-    budget_thresholds = _get_thresholds_env("BUDGET_THRESHOLDS", DEFAULT_BUDGET_THRESHOLDS)
-
-    try:
-        month_to_date = _get_month_to_date_cost(today, DEFAULT_METRIC)
-        previous_day = _get_previous_day_cost(today, DEFAULT_METRIC)
-        forecast = _get_forecast_cost(today, DEFAULT_METRIC)
-        daily_costs = _get_daily_costs(today, DEFAULT_METRIC, trend_days)
-        service_breakdown = _get_service_breakdown(today, DEFAULT_METRIC, top_services_count)
-    except ClientError as exc:
-        logger.error("Cost Explorer API error: %s", exc)
-        month_to_date = None
-        previous_day = None
-        forecast = None
-        daily_costs = []
-        service_breakdown = None
-
-    alerts = []
-    alerts.extend(_calculate_budget_alerts(month_to_date, budget_amount, budget_thresholds))
-    daily_anomaly = _calculate_daily_anomaly(daily_costs, anomaly_threshold)
-    if daily_anomaly:
-        alerts.append(daily_anomaly)
-
-    email_content = _build_email_content(
-        today,
-        month_to_date,
-        forecast,
-        previous_day,
-        daily_costs,
-        service_breakdown,
-        alerts,
-    )
-
-    message_id = None
-    try:
-        message_id = _send_email_via_ses(
+        mid = email_builder.send(
             email_content["subject"],
             email_content["html"],
             email_content["text"],
+            cfg["sender_email"],
+            cfg["recipient_emails"],
         )
+        return mid, None
     except (ClientError, ValueError) as exc:
-        logger.error("Failed to send SES email: %s", exc)
+        logger.error("Email send failed: %s", exc)
+        return None, str(exc)
 
-    response = {
-        "status": "ok",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "archive_enabled": os.getenv("ARCHIVE_ENABLED", "false"),
-        "budget_param_name": os.getenv("BUDGET_PARAM_NAME", ""),
-        "budget_amount": str(budget_amount) if budget_amount is not None else None,
-        "metric": DEFAULT_METRIC,
-        "month_to_date": _stringify_cost_payload(month_to_date),
-        "previous_day": _stringify_cost_payload(previous_day),
-        "forecast": _stringify_cost_payload(forecast),
-        "daily_costs": _stringify_daily_costs(daily_costs),
-        "service_breakdown": _stringify_service_breakdown(service_breakdown),
-        "alerts": _stringify_alerts(alerts),
-        "email_preview": email_content,
-        "ses_message_id": message_id,
-    }
 
-    archive_key = None
-    try:
-        archive_key = _archive_report(response, today)
-    except ClientError as exc:
-        logger.error("Failed to archive report: %s", exc)
-
-    response["archive_key"] = archive_key
-
+def _build_response(data, cfg, message_id, email_error, archive_key):
+    """Assemble the Lambda response payload."""
     return {
-        "statusCode": 200,
-        "body": json.dumps(response),
+        "status": "ok" if message_id else "partial",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "metric": cfg["metric"],
+        "budget_amount": str(cfg["budget_amount"]) if cfg["budget_amount"] else None,
+        "ses_message_id": message_id,
+        "email_error": email_error,
+        "archive_key": archive_key,
     }
+
+
+def lambda_handler(event, context):
+    logger.info("Event: %s", json.dumps(event))
+
+    cfg = config.load()
+    today = datetime.now(timezone.utc).date()
+
+    # 1. Collect cost data
+    data = _collect_cost_data(today, cfg)
+
+    # 2. Compute alerts
+    data["alerts"] = _compute_alerts(data, cfg)
+
+    # 2b. Compute credit estimate
+    data["credit_estimate"] = _estimate_credit_exhaustion(today, data)
+
+    # 3. Build and send email
+    email_content = email_builder.build_email(today, data, cfg)
+    message_id, email_error = _send_report(email_content, cfg)
+
+    # 4. Archive
+    archive_key = None
+    if cfg["archive_enabled"]:
+        archive_key = _safe_call("archive report", archive.archive_report, data, today, cfg["archive_bucket"])
+
+    # 5. Response
+    response = _build_response(data, cfg, message_id, email_error, archive_key)
+    return {"statusCode": 200, "body": json.dumps(response, default=str)}

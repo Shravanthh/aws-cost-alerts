@@ -62,7 +62,7 @@ Globals:
   Function:
     Runtime: python3.14
     Timeout: 60
-    MemorySize: 1024
+    MemorySize: 256
     Tracing: Active
     Environment:
       Variables:
@@ -80,12 +80,21 @@ Globals:
         BUDGET_THRESHOLDS: !Ref BudgetThresholds
 
 Resources:
+  DailyLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${ProjectName}-daily'
+      RetentionInDays: 14
+
   CostAlertFunction:
     Type: AWS::Serverless::Function
+    DependsOn: DailyLogGroup
     Properties:
       FunctionName: !Sub '${ProjectName}-daily'
       CodeUri: src/
       Handler: handler.lambda_handler
+      LoggingConfig:
+        LogGroup: !Sub '/aws/lambda/${ProjectName}-daily'
       Policies:
         - AWSLambdaBasicExecutionRole
         - Statement:
@@ -94,31 +103,23 @@ Resources:
               Action:
                 - ce:GetCostAndUsage
                 - ce:GetCostForecast
-                - ce:GetDimensionValues
               Resource: '*'
             - Sid: ParameterRead
               Effect: Allow
               Action:
                 - ssm:GetParameter
-              Resource: '*'
-            - Sid: CloudWatchMetrics
-              Effect: Allow
-              Action:
-                - cloudwatch:PutMetricData
-              Resource: '*'
+              Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${BudgetParameterName}'
             - Sid: SendSesEmail
               Effect: Allow
               Action:
                 - ses:SendEmail
-                - ses:SendRawEmail
-              Resource: '*'
+              Resource: !Sub 'arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/*'
             - !If
               - UseArchive
               - Sid: ArchiveWrite
                 Effect: Allow
                 Action:
                   - s3:PutObject
-                  - s3:GetObject
                 Resource:
                   - !Sub 'arn:${AWS::Partition}:s3:::${ArchiveBucket}/*'
               - !Ref AWS::NoValue
@@ -129,6 +130,51 @@ Resources:
             Schedule: !Ref ScheduleExpression
             Name: !Sub '${ProjectName}-daily-schedule'
             Description: Daily AWS cost alert schedule
+            Enabled: true
+
+  MonitorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${ProjectName}-monitor'
+      RetentionInDays: 14
+
+  CostMonitorFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: MonitorLogGroup
+    Properties:
+      FunctionName: !Sub '${ProjectName}-monitor'
+      CodeUri: src/
+      Handler: cost_monitor.lambda_handler
+      LoggingConfig:
+        LogGroup: !Sub '/aws/lambda/${ProjectName}-monitor'
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Statement:
+            - Sid: CostExplorerRead
+              Effect: Allow
+              Action:
+                - ce:GetCostAndUsage
+              Resource: '*'
+            - Sid: ParameterReadWrite
+              Effect: Allow
+              Action:
+                - ssm:GetParameter
+                - ssm:PutParameter
+              Resource:
+                - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${BudgetParameterName}'
+                - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/cost-alerts/last-alert-month'
+            - Sid: SendSesEmail
+              Effect: Allow
+              Action:
+                - ses:SendEmail
+              Resource: !Sub 'arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/*'
+      Events:
+        MonitorSchedule:
+          Type: Schedule
+          Properties:
+            Schedule: rate(6 hours)
+            Name: !Sub '${ProjectName}-monitor-schedule'
+            Description: Ad-hoc cost threshold monitor (every 6 hours)
             Enabled: true
 
   ArchiveBucket:
@@ -157,6 +203,9 @@ Outputs:
   FunctionName:
     Description: Lambda function name
     Value: !Ref CostAlertFunction
+  MonitorFunctionName:
+    Description: Cost monitor function name
+    Value: !Ref CostMonitorFunction
   ScheduleExpression:
     Description: EventBridge schedule
     Value: !Ref ScheduleExpression

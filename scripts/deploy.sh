@@ -100,10 +100,10 @@ fi
 
 parameter_overrides=(
   "ProjectName=$PROJECT_NAME"
-  "ScheduleExpression=$SCHEDULE_EXPRESSION"
+  "ScheduleExpression='$SCHEDULE_EXPRESSION'"
   "SenderEmail=$SENDER_EMAIL"
   "RecipientEmails=$RECIPIENT_EMAILS"
-  "EmailSubjectPrefix=$EMAIL_SUBJECT_PREFIX"
+  "EmailSubjectPrefix='$EMAIL_SUBJECT_PREFIX'"
   "BudgetParameterName=$BUDGET_PARAMETER_NAME"
   "ArchiveEnabled=$ARCHIVE_ENABLED"
   "ArchiveRetentionDays=$ARCHIVE_RETENTION_DAYS"
