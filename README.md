@@ -129,7 +129,7 @@ For production use, [request SES production access](https://docs.aws.amazon.com/
 
 ```bash
 aws lambda invoke \
-  --function-name aws-cost-alerts-daily \
+  --function-name aws-cost-alerts-weekly \
   --payload '{}' \
   --region us-east-1 \
   /tmp/output.json && cat /tmp/output.json | python3 -m json.tool && rm /tmp/output.json

@@ -81,18 +81,18 @@ Resources:
   DailyLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
-      LogGroupName: !Sub '/aws/lambda/${ProjectName}-daily'
+      LogGroupName: !Sub '${ProjectName}-weekly'
       RetentionInDays: 14
 
   CostAlertFunction:
     Type: AWS::Serverless::Function
     DependsOn: DailyLogGroup
     Properties:
-      FunctionName: !Sub '${ProjectName}-daily'
+      FunctionName: !Sub '${ProjectName}-weekly'
       CodeUri: src/
       Handler: handler.lambda_handler
       LoggingConfig:
-        LogGroup: !Sub '/aws/lambda/${ProjectName}-daily'
+        LogGroup: !Sub '${ProjectName}-weekly'
       Policies:
         - AWSLambdaBasicExecutionRole
         - Statement:
