@@ -11,7 +11,6 @@ from formatters import (
     percentage,
     service_table_html,
     service_table_text,
-    summary_card,
     summary_row,
     trend_chart_html,
     trend_text,
@@ -55,9 +54,13 @@ def _build_alerts_text(alerts):
     lines = ["Alerts:"]
     for a in alerts:
         if a["type"] == "BUDGET_THRESHOLD":
-            lines.append(f"- Budget at {percentage(a['percent_used'])} (threshold {percentage(a['threshold_percent'])})")
+            lines.append(
+                f"- Budget at {percentage(a['percent_used'])} (threshold {percentage(a['threshold_percent'])})"
+            )
         elif a["type"] == "DAILY_ANOMALY":
-            lines.append(f"- Daily anomaly: {percentage(a['percent_over_average'])} above average")
+            lines.append(
+                f"- Daily anomaly: {percentage(a['percent_over_average'])} above average"
+            )
     return "\n".join(lines)
 
 
@@ -98,7 +101,9 @@ def build_email(report_date, data, cfg):
 
     mtd_str = currency(mtd.get("amount"), mtd.get("unit")) if mtd else "N/A"
     prev_str = currency(prev.get("amount"), prev.get("unit")) if prev else "N/A"
-    credits_str, net_str, month_end_str, end_after_str = _compute_credit_summary(mtd, forecast, credit_info)
+    credits_str, net_str, month_end_str, end_after_str = _compute_credit_summary(
+        mtd, forecast, credit_info
+    )
 
     alert_html = _build_alerts_html(alerts)
     alert_text = _build_alerts_text(alerts)
@@ -117,21 +122,25 @@ def build_email(report_date, data, cfg):
         # Summary cards — stacked
         '<div style="background:#fff;border-radius:10px;padding:16px;margin-bottom:16px;">'
         '<h2 style="margin:0 0 10px;font-size:15px;color:#333;">Summary</h2>'
-        + summary_row([
-            ("Month-to-date", mtd_str, "#111"),
-            ("Yesterday", prev_str, "#111"),
-            ("Forecast Month-end", month_end_str, "#111"),
-        ])
-        + '</div>'
+        + summary_row(
+            [
+                ("Month-to-date", mtd_str, "#111"),
+                ("Most Recent Day", prev_str, "#111"),
+                ("Forecast Month-end", month_end_str, "#111"),
+            ]
+        )
+        + "</div>"
         # Credits — stacked
         '<div style="background:#fff;border-radius:10px;padding:16px;margin-bottom:16px;">'
         '<h2 style="margin:0 0 10px;font-size:15px;color:#333;">Credits</h2>'
-        + summary_row([
-            ("Credits Applied", f"-{credits_str}", "#2e7d32"),
-            ("Net After Credits", net_str, "#111"),
-            ("Month-end After Credits", end_after_str, "#1565c0"),
-        ])
-        + '</div>'
+        + summary_row(
+            [
+                ("Credits Applied", f"-{credits_str}", "#2e7d32"),
+                ("Net After Credits", net_str, "#111"),
+                ("Month-end After Credits", end_after_str, "#1565c0"),
+            ]
+        )
+        + "</div>"
         # Week over week
         f"{wow_card_html(wow)}"
         # Credit estimate
@@ -154,22 +163,24 @@ def build_email(report_date, data, cfg):
     parts = [f"AWS Cost Report - {report_date.isoformat()}", ""]
     if alert_text:
         parts.extend([alert_text, ""])
-    parts.extend([
-        f"Month-to-date: {mtd_str}",
-        f"Yesterday: {prev_str}",
-        f"Forecast month-end: {month_end_str}",
-        f"Credits applied: -{credits_str}",
-        f"Net after credits: {net_str}",
-        f"Forecast month-end after credits: {end_after_str}",
-        "",
-        wow_text(wow),
-        "",
-        credit_estimate_text(credit_est),
-        "",
-        trend_text(daily),
-        "",
-        service_table_text(breakdown),
-    ])
+    parts.extend(
+        [
+            f"Month-to-date: {mtd_str}",
+            f"Most recent day: {prev_str}",
+            f"Forecast month-end: {month_end_str}",
+            f"Credits applied: -{credits_str}",
+            f"Net after credits: {net_str}",
+            f"Forecast month-end after credits: {end_after_str}",
+            "",
+            wow_text(wow),
+            "",
+            credit_estimate_text(credit_est),
+            "",
+            trend_text(daily),
+            "",
+            service_table_text(breakdown),
+        ]
+    )
     text = "\n".join(parts)
 
     return {"subject": subject, "html": html, "text": text}

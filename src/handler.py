@@ -27,37 +27,48 @@ def _safe_call(label, fn, *args, default=None):
 
 
 def _collect_cost_data(today, cfg):
-    """Fetch all cost data from Cost Explorer."""
+    """Fetch all cost data from Cost Explorer — 4 API calls total."""
     metric = cfg["metric"]
 
-    # Single call for MTD + previous day + daily trend (saves 2 API calls)
     breakdown = _safe_call(
-        "get monthly breakdown",
-        cost_explorer.get_monthly_daily_breakdown, today, metric, cfg["trend_days"],
-        default={"month_to_date": None, "previous_day": None, "daily_costs": []},
+        "get daily breakdown",
+        cost_explorer.get_daily_breakdown,
+        today,
+        metric,
+        cfg["trend_days"],
+        default={"month_to_date": None, "previous_day": None, "daily_costs": [], "week_over_week": None},
+    )
+
+    credit_info = _safe_call(
+        "get credit info",
+        cost_explorer.get_credit_info,
+        today,
+        metric,
+        default={"credits_used": Decimal("0"), "daily_history": [], "unit": "USD"},
     )
 
     return {
         "month_to_date": breakdown["month_to_date"],
         "previous_day": breakdown["previous_day"],
         "daily_costs": breakdown["daily_costs"],
+        "week_over_week": breakdown["week_over_week"],
+        "credit_info": credit_info,
         "forecast": _safe_call("get forecast", cost_explorer.get_forecast, today, metric),
-        "service_breakdown": _safe_call("get services", cost_explorer.get_service_breakdown, today, metric, cfg["top_services"]),
-        "credit_info": _safe_call("get credits", cost_explorer.get_credit_usage, today, metric),
-        "week_over_week": _safe_call("get WoW", cost_explorer.get_week_over_week, today, metric),
-        "credit_daily_history": _safe_call("get credit history", cost_explorer.get_credit_daily_history, today, metric, default=[]),
+        "service_breakdown": _safe_call(
+            "get services", cost_explorer.get_service_breakdown, today, metric, cfg["top_services"]
+        ),
     }
 
 
 def _estimate_credit_exhaustion(today, data):
     """Estimate when credits will run out based on daily burn rate."""
     credit_info = data.get("credit_info")
-    daily_history = data.get("credit_daily_history", [])
-    if not credit_info or not daily_history:
+    if not credit_info:
         return None
 
     credits_used = credit_info.get("credits_used", Decimal("0"))
-    if credits_used <= 0:
+    daily_history = credit_info.get("daily_history", [])
+    if credits_used <= 0 or not daily_history:
         return None
 
     avg_daily = sum(daily_history) / len(daily_history)
@@ -65,7 +76,11 @@ def _estimate_credit_exhaustion(today, data):
         return None
 
     month_start = today.replace(day=1)
-    month_end = date(today.year + 1, 1, 1) if today.month == 12 else date(today.year, today.month + 1, 1)
+    month_end = (
+        date(today.year + 1, 1, 1)
+        if today.month == 12
+        else date(today.year, today.month + 1, 1)
+    )
     days_in_month = (month_end - month_start).days
     days_elapsed = (today - month_start).days or 1
 
@@ -84,14 +99,23 @@ def _compute_alerts(data, cfg):
     result = []
     mtd = data.get("month_to_date")
     credit_info = data.get("credit_info")
-    credits_used = credit_info.get("credits_used", Decimal("0")) if credit_info else Decimal("0")
+    credits_used = (
+        credit_info.get("credits_used", Decimal("0")) if credit_info else Decimal("0")
+    )
 
     if mtd:
-        result.extend(alerts.check_budget_thresholds(
-            mtd.get("amount"), cfg["budget_amount"], cfg["budget_thresholds"], credits_used,
-        ))
+        result.extend(
+            alerts.check_budget_thresholds(
+                mtd.get("amount"),
+                cfg["budget_amount"],
+                cfg["budget_thresholds"],
+                credits_used,
+            )
+        )
 
-    anomaly = alerts.check_daily_anomaly(data.get("daily_costs", []), cfg["anomaly_threshold"])
+    anomaly = alerts.check_daily_anomaly(
+        data.get("daily_costs", []), cfg["anomaly_threshold"]
+    )
     if anomaly:
         result.append(anomaly)
 
@@ -149,7 +173,9 @@ def lambda_handler(event, context):
     # 4. Archive
     archive_key = None
     if cfg["archive_enabled"]:
-        archive_key = _safe_call("archive report", archive.archive_report, data, today, cfg["archive_bucket"])
+        archive_key = _safe_call(
+            "archive report", archive.archive_report, data, today, cfg["archive_bucket"]
+        )
 
     # 5. Response
     response = _build_response(data, cfg, message_id, email_error, archive_key)

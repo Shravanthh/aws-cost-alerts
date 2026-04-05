@@ -1,12 +1,12 @@
 # AWS Cost Alerts
 
-Automated daily AWS cost reports and ad-hoc threshold alerts delivered to your inbox via SES. Built with AWS SAM.
+Automated weekly AWS cost reports delivered to your inbox via SES. Built with AWS SAM.
 
 ## What You Get
 
-**Daily Report Email** (8:00 AM UTC) with:
+**Weekly Report Email** (every Saturday, 8:00 AM UTC) with:
 - Month-to-date spend and forecast month-end
-- Previous day cost
+- Most recent day cost
 - Credits applied, net after credits, forecast after credits
 - Week-over-week comparison
 - Credit burn rate and projected monthly usage
@@ -14,37 +14,26 @@ Automated daily AWS cost reports and ad-hoc threshold alerts delivered to your i
 - Top 10 services breakdown
 - Budget threshold and daily anomaly alerts
 
-**Ad-hoc Cost Monitor** (every 6 hours):
-- Alerts when gross monthly spend exceeds your budget threshold
-- One alert per month (deduped via SSM parameter)
-- Shows gross, credits, and net cost in the alert
-
 ## Architecture
 
 ```
-EventBridge (daily cron)  ──▶  CostAlertFunction   ──▶  SES (report email)
-                                     │                        │
-                                     ▼                        ▼
-                               Cost Explorer            S3 (archive)
-                                     │
-EventBridge (every 6h)    ──▶  CostMonitorFunction ──▶  SES (alert email)
-                                     │
-                                     ▼
-                               SSM (dedup state)
+EventBridge (Saturday 8 AM UTC)  ──▶  CostAlertFunction  ──▶  SES (report email)
+                                             │                       │
+                                             ▼                       ▼
+                                       Cost Explorer           S3 (archive)
 ```
 
 ### Module Structure
 
 ```
 src/
-├── handler.py          # Daily report orchestrator
-├── cost_monitor.py     # Ad-hoc threshold monitor
-├── config.py           # Environment + SSM config loading
-├── cost_explorer.py    # All Cost Explorer API queries
-├── alerts.py           # Budget threshold + anomaly detection
-├── formatters.py       # Currency, HTML components, charts
-├── email_builder.py    # Email assembly + SES sending
-└── archive.py          # S3 report archival
+├── handler.py        # Lambda orchestrator
+├── config.py         # Environment config loading
+├── cost_explorer.py  # Cost Explorer API queries (4 calls per run)
+├── alerts.py         # Budget threshold + anomaly detection
+├── formatters.py     # Currency, HTML components, charts
+├── email_builder.py  # Email assembly + SES sending
+└── archive.py        # S3 report archival
 ```
 
 ## Prerequisites
@@ -73,7 +62,7 @@ cp .env.example .env
 ./scripts/deploy.sh
 ```
 
-That's it. You'll receive your first cost report at 8:00 AM UTC the next day.
+That's it. You'll receive your first cost report the coming Saturday at 8:00 AM UTC.
 
 ## Configuration
 
@@ -87,10 +76,9 @@ All configuration is via the `.env` file:
 | `SENDER_EMAIL` | — | SES-verified sender email (required) |
 | `RECIPIENT_EMAILS` | — | Comma-separated recipient emails (required) |
 | `EMAIL_SUBJECT_PREFIX` | `AWS Cost Alert` | Email subject prefix |
-| `SCHEDULE_EXPRESSION` | `cron(0 8 * * ? *)` | Daily report schedule ([EventBridge cron](https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-cron-expressions.html)) |
-| `BUDGET_PARAMETER_NAME` | `/cost-alerts/budget-amount` | SSM parameter for monthly budget |
-| `BUDGET_DEFAULT_AMOUNT` | `10` | Default budget if SSM parameter doesn't exist |
-| `ARCHIVE_ENABLED` | `true` | Archive daily reports to S3 |
+| `SCHEDULE_EXPRESSION` | `cron(0 8 ? * 7 *)` | Report schedule ([EventBridge cron](https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-cron-expressions.html)) |
+| `BUDGET_AMOUNT` | `10` | Monthly budget in USD for threshold alerts |
+| `ARCHIVE_ENABLED` | `true` | Archive reports to S3 |
 | `ARCHIVE_RETENTION_DAYS` | `30` | Days to retain archived reports |
 | `TOP_SERVICES_COUNT` | `10` | Number of top services in breakdown |
 | `TREND_DAYS` | `7` | Days in the daily trend chart |
@@ -115,59 +103,47 @@ For production use, [request SES production access](https://docs.aws.amazon.com/
 | Metric | Calculation |
 |--------|-------------|
 | **Month-to-date** | `GetCostAndUsage` for current month, excluding Credit/Refund/EDP record types |
-| **Forecast month-end** | MTD + `GetCostForecast` (remaining days) |
+| **Forecast month-end** | MTD + `GetCostForecast` (remaining days from tomorrow) |
 | **Credits applied** | `GetCostAndUsage` filtered to Credit + EDP record types only |
 | **Net after credits** | MTD − Credits |
-| **Week-over-week** | This week (Mon–today) vs same days last week |
+| **Week-over-week** | This week (Mon–today) vs same days last week, derived from the same API call |
 | **Credit burn rate** | Average daily credit usage over last 14 days |
-| **Ad-hoc alert** | Triggers when gross MTD (before credits) exceeds budget |
 
 ## What Gets Deployed
 
 | Resource | Type | Purpose |
 |----------|------|---------|
-| `CostAlertFunction` | Lambda | Daily cost report |
-| `CostMonitorFunction` | Lambda | 6-hourly threshold monitor |
+| `CostAlertFunction` | Lambda (128 MB) | Weekly cost report |
 | `DailyLogGroup` | CloudWatch Logs | 14-day retention |
-| `MonitorLogGroup` | CloudWatch Logs | 14-day retention |
 | `ArchiveBucket` | S3 (conditional) | Report JSON archive |
-| 2x EventBridge Rules | Schedule | Triggers for both Lambdas |
+| EventBridge Rule | Schedule | Saturday 8 AM UTC trigger |
 | IAM Role | Per function | Least-privilege policies |
 
 ### IAM Permissions (Least Privilege)
 
 - `ce:GetCostAndUsage`, `ce:GetCostForecast` — Cost Explorer (requires `Resource: *`)
-- `ssm:GetParameter` — scoped to budget parameter ARN
-- `ssm:PutParameter` — monitor only, scoped to budget + alert state parameters
 - `ses:SendEmail` — scoped to account SES identities
 - `s3:PutObject` — scoped to archive bucket (conditional)
 
 ## Manual Testing
 
-Invoke the daily report:
 ```bash
-aws lambda invoke --function-name aws-cost-alerts-daily --payload '{}' /tmp/output.json
-cat /tmp/output.json | python3 -m json.tool
-```
-
-Invoke the cost monitor:
-```bash
-aws lambda invoke --function-name aws-cost-alerts-monitor --payload '{}' /tmp/output.json
-cat /tmp/output.json | python3 -m json.tool
+aws lambda invoke \
+  --function-name aws-cost-alerts-daily \
+  --payload '{}' \
+  --region us-east-1 \
+  /tmp/output.json && cat /tmp/output.json | python3 -m json.tool
 ```
 
 ## Customization
 
-**Change schedule**: Update `SCHEDULE_EXPRESSION` in `.env`. Uses [EventBridge cron syntax](https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-cron-expressions.html).
+**Change schedule**: Update `SCHEDULE_EXPRESSION` in `.env` and redeploy. Uses [EventBridge cron syntax](https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-cron-expressions.html).
 
-**Change budget**: Update the SSM parameter directly:
-```bash
-aws ssm put-parameter --name /cost-alerts/budget-amount --value 100 --type String --overwrite
-```
+**Change budget**: Update `BUDGET_AMOUNT` in `.env` and redeploy.
 
 **Disable archiving**: Set `ARCHIVE_ENABLED=false` in `.env`.
 
-**Change cost metric**: Set `COST_METRIC` environment variable to `BlendedCost`, `AmortizedCost`, etc.
+**Change cost metric**: Set `COST_METRIC` in `.env` to `BlendedCost`, `AmortizedCost`, etc.
 
 ## Cleanup
 

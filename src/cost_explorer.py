@@ -19,7 +19,11 @@ def _month_period(today):
 
 
 def _month_end(today):
-    return date(today.year + 1, 1, 1) if today.month == 12 else date(today.year, today.month + 1, 1)
+    return (
+        date(today.year + 1, 1, 1)
+        if today.month == 12
+        else date(today.year, today.month + 1, 1)
+    )
 
 
 def _parse_amount(raw):
@@ -32,94 +36,87 @@ def _parse_amount(raw):
         return None
 
 
-def _sum_results(results, metric):
-    total, unit = Decimal("0"), None
-    for entry in results:
-        info = entry.get("Total", {}).get(metric, {})
-        amount = _parse_amount(info.get("Amount"))
-        unit = info.get("Unit", unit)
-        if amount is not None:
-            total += amount
-    return total, unit
-
-
 def _cost_result(start, end, total, unit):
     return {"start": start, "end": end, "amount": total, "unit": unit}
 
 
-def get_monthly_daily_breakdown(today, metric, trend_days):
-    """Single API call: daily granularity for the month. Derives MTD, previous day, and trend."""
-    start, end = _month_period(today)
-    if start == end:
-        return {
-            "month_to_date": _cost_result(start, end, Decimal("0"), "USD"),
-            "previous_day": _cost_result(start, end, Decimal("0"), "USD"),
-            "daily_costs": [],
-        }
+def get_daily_breakdown(today, metric, trend_days):
+    """Single API call covering month + last week. Derives MTD, previous day, trend, and week-over-week."""
+    month_start, end = _month_period(today)
+    weekday = today.weekday()  # 0=Mon
+    last_monday = today - timedelta(days=weekday + 7)
+    query_start = min(date.fromisoformat(month_start), last_monday).isoformat()
+
     resp = _ce.get_cost_and_usage(
-        TimePeriod={"Start": start, "End": end},
+        TimePeriod={"Start": query_start, "End": end},
         Granularity="DAILY",
         Metrics=[metric],
         Filter=EXCLUDE_RECORD_TYPES,
     )
-    all_days, mtd_total, unit = [], Decimal("0"), None
+
+    daily_by_date, unit = {}, None
     for entry in resp.get("ResultsByTime", []):
         info = entry.get("Total", {}).get(metric, {})
         amount = _parse_amount(info.get("Amount"))
         unit = info.get("Unit", unit)
-        if amount is not None:
-            mtd_total += amount
-            all_days.append({
-                "date": entry.get("TimePeriod", {}).get("Start"),
-                "amount": amount,
-                "unit": unit,
-            })
+        d = entry.get("TimePeriod", {}).get("Start")
+        if amount is not None and d:
+            daily_by_date[d] = {"date": d, "amount": amount, "unit": unit}
 
-    prev = all_days[-1] if all_days else {"amount": Decimal("0"), "unit": unit or "USD"}
-    trend = all_days[-trend_days:] if len(all_days) > trend_days else all_days
+    # MTD: only current month days
+    mtd_days = [v for k, v in sorted(daily_by_date.items()) if k >= month_start]
+    mtd_total = sum(d["amount"] for d in mtd_days)
+    prev = mtd_days[-1] if mtd_days else {"date": end, "amount": Decimal("0"), "unit": unit or "USD"}
+    trend = mtd_days[-trend_days:] if len(mtd_days) > trend_days else mtd_days
+
+    # Week-over-week from same data
+    this_monday = (today - timedelta(days=weekday)).isoformat()
+    last_monday_str = last_monday.isoformat()
+    last_week_end_str = (last_monday + timedelta(days=weekday)).isoformat()
+
+    if weekday == 0:  # Monday — no data for this week yet
+        this_total, last_total = Decimal("0"), Decimal("0")
+        change_pct = None
+    else:
+        this_total = sum(v["amount"] for k, v in daily_by_date.items() if this_monday <= k < end)
+        last_total = sum(v["amount"] for k, v in daily_by_date.items() if last_monday_str <= k < last_week_end_str)
+        change_pct = ((this_total - last_total) / last_total * 100) if last_total > 0 else None
 
     return {
-        "month_to_date": _cost_result(start, end, mtd_total, unit),
-        "previous_day": _cost_result(
-            prev.get("date", end), end, prev.get("amount", Decimal("0")), prev.get("unit", unit),
-        ),
+        "month_to_date": _cost_result(month_start, end, mtd_total, unit),
+        "previous_day": _cost_result(prev["date"], end, prev["amount"], prev.get("unit", unit)),
         "daily_costs": trend,
+        "week_over_week": {"this_week": this_total, "last_week": last_total, "change_pct": change_pct, "unit": unit or "USD"},
     }
 
 
-def get_month_to_date(today, metric):
-    """Standalone MTD query — used by cost_monitor."""
-    start, end = _month_period(today)
-    if start == end:
-        return _cost_result(start, end, Decimal("0"), "USD")
+def get_credit_info(today, metric, days=14):
+    """Single API call: daily credits for last N days. Derives credits_used (this month) + daily_history."""
+    month_start = today.replace(day=1).isoformat()
+    start = (today - timedelta(days=days)).isoformat()
+    end = today.isoformat()
     resp = _ce.get_cost_and_usage(
         TimePeriod={"Start": start, "End": end},
-        Granularity="MONTHLY",
-        Metrics=[metric],
-        Filter=EXCLUDE_RECORD_TYPES,
-    )
-    total, unit = _sum_results(resp.get("ResultsByTime", []), metric)
-    return _cost_result(start, end, total, unit)
-
-
-def get_credit_usage(today, metric):
-    """Credits and discounts applied this month."""
-    start, end = _month_period(today)
-    if start == end:
-        return {"credits_used": Decimal("0"), "unit": "USD"}
-    resp = _ce.get_cost_and_usage(
-        TimePeriod={"Start": start, "End": end},
-        Granularity="MONTHLY",
+        Granularity="DAILY",
         Metrics=[metric],
         Filter=CREDIT_FILTER,
     )
-    total, unit = _sum_results(resp.get("ResultsByTime", []), metric)
-    return {"credits_used": abs(total), "unit": unit or "USD"}
+    credits_used, daily_history, unit = Decimal("0"), [], None
+    for entry in resp.get("ResultsByTime", []):
+        info = entry.get("Total", {}).get(metric, {})
+        amount = _parse_amount(info.get("Amount"))
+        unit = info.get("Unit", unit)
+        d = entry.get("TimePeriod", {}).get("Start")
+        if amount is not None:
+            daily_history.append(abs(amount))
+            if d and d >= month_start:
+                credits_used += abs(amount)
+    return {"credits_used": credits_used, "daily_history": daily_history, "unit": unit or "USD"}
 
 
 def get_forecast(today, metric):
     """Remaining month forecast from today to month end."""
-    start = today.isoformat()
+    start = (today + timedelta(days=1)).isoformat()
     end = _month_end(today).isoformat()
     forecast_metric = FORECAST_METRIC_MAP.get(metric, "UNBLENDED_COST")
     resp = _ce.get_cost_forecast(
@@ -134,72 +131,6 @@ def get_forecast(today, metric):
         "amount": _parse_amount(total.get("Amount")),
         "unit": total.get("Unit"),
     }
-
-
-def get_week_over_week(today, metric):
-    """Compare this week's spend (Mon–today) vs same days last week."""
-    weekday = today.weekday()  # 0=Mon
-    this_week_start = today - timedelta(days=weekday)
-    last_week_start = this_week_start - timedelta(days=7)
-    last_week_end = last_week_start + timedelta(days=weekday)
-
-    this_start = this_week_start.isoformat()
-    this_end = today.isoformat()
-
-    # On Monday, start == end — no data for this week yet
-    if this_start == this_end:
-        return {"this_week": Decimal("0"), "last_week": Decimal("0"), "change_pct": None, "unit": "USD"}
-
-    resp = _ce.get_cost_and_usage(
-        TimePeriod={"Start": this_start, "End": this_end},
-        Granularity="MONTHLY",
-        Metrics=[metric],
-        Filter=EXCLUDE_RECORD_TYPES,
-    )
-    this_total, unit = _sum_results(resp.get("ResultsByTime", []), metric)
-
-    lw_start = last_week_start.isoformat()
-    lw_end = last_week_end.isoformat()
-    if lw_start == lw_end:
-        return {"this_week": this_total, "last_week": Decimal("0"), "change_pct": None, "unit": unit or "USD"}
-
-    resp = _ce.get_cost_and_usage(
-        TimePeriod={"Start": lw_start, "End": lw_end},
-        Granularity="MONTHLY",
-        Metrics=[metric],
-        Filter=EXCLUDE_RECORD_TYPES,
-    )
-    last_total, unit = _sum_results(resp.get("ResultsByTime", []), metric)
-
-    change_pct = None
-    if last_total > 0:
-        change_pct = ((this_total - last_total) / last_total) * 100
-
-    return {
-        "this_week": this_total,
-        "last_week": last_total,
-        "change_pct": change_pct,
-        "unit": unit or "USD",
-    }
-
-
-def get_credit_daily_history(today, metric, days=14):
-    """Get daily credit amounts to calculate burn rate."""
-    start = (today - timedelta(days=days)).isoformat()
-    end = today.isoformat()
-    resp = _ce.get_cost_and_usage(
-        TimePeriod={"Start": start, "End": end},
-        Granularity="DAILY",
-        Metrics=[metric],
-        Filter=CREDIT_FILTER,
-    )
-    daily_credits = []
-    for entry in resp.get("ResultsByTime", []):
-        info = entry.get("Total", {}).get(metric, {})
-        amount = _parse_amount(info.get("Amount"))
-        if amount is not None:
-            daily_credits.append(abs(amount))
-    return daily_credits
 
 
 def get_service_breakdown(today, metric, max_services):
@@ -239,6 +170,8 @@ def get_service_breakdown(today, metric, max_services):
     services.sort(key=lambda s: s["amount"], reverse=True)
     top = services[:max_services]
     for s in top:
-        s["percent_of_total"] = (s["amount"] / total * 100) if total > 0 else Decimal("0")
+        s["percent_of_total"] = (
+            (s["amount"] / total * 100) if total > 0 else Decimal("0")
+        )
 
     return {"total": total, "unit": unit, "services": top}

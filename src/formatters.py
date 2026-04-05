@@ -42,7 +42,7 @@ def summary_card(label, value, color="#111"):
         '<div style="background:#f8f9fb;border-radius:8px;padding:12px 16px;margin-bottom:8px;">'
         f'<div style="font-size:12px;color:#666;margin-bottom:2px;">{label}</div>'
         f'<div style="font-size:20px;font-weight:700;color:{color};">{value}</div>'
-        '</div>'
+        "</div>"
     )
 
 
@@ -68,7 +68,7 @@ def service_table_html(breakdown):
             f'<div style="display:inline-block;font-size:14px;font-weight:600;">{amt}</div>'
             f'<div style="display:inline-block;font-size:12px;color:#888;margin-left:8px;">{pct}</div>'
             f'<div style="margin-top:6px;">{percent_bar(s.get("percent_of_total"))}</div>'
-            '</div>'
+            "</div>"
         )
 
     return "".join(rows)
@@ -91,7 +91,7 @@ def trend_chart_html(daily_costs):
     if not daily_costs:
         return '<p style="color:#888;">No daily trend data available.</p>'
 
-    max_amt = max((e["amount"] for e in daily_costs), default=Decimal("0"))
+    max_amt = max(e["amount"] for e in daily_costs)
     col_pct = f"{100 / len(daily_costs):.1f}%"
     bars = []
     for e in daily_costs:
@@ -126,19 +126,21 @@ def wow_card_html(wow):
     if pct is not None:
         arrow = "▲" if pct > 0 else "▼" if pct < 0 else "–"
         color = "#d32f2f" if pct > 0 else "#2e7d32" if pct < 0 else "#666"
-        pct_str = f'{arrow} {abs(pct):.1f}%'
+        pct_str = f"{arrow} {abs(pct):.1f}%"
     else:
         pct_str = "N/A"
         color = "#666"
     return (
         '<div style="background:#fff;border-radius:10px;padding:16px;margin-bottom:16px;">'
         '<h2 style="margin:0 0 10px;font-size:15px;color:#333;">Week over Week</h2>'
-        + summary_row([
-            ("This Week", this_w, "#111"),
-            ("Last Week (same days)", last_w, "#111"),
-            ("Change", pct_str, color),
-        ])
-        + '</div>'
+        + summary_row(
+            [
+                ("This Week", this_w, "#111"),
+                ("Last Week (same days)", last_w, "#111"),
+                ("Change", pct_str, color),
+            ]
+        )
+        + "</div>"
     )
 
 
@@ -167,14 +169,16 @@ def credit_estimate_html(est):
     return (
         '<div style="background:#fff;border-radius:10px;padding:16px;margin-bottom:16px;">'
         '<h2 style="margin:0 0 10px;font-size:15px;color:#333;">Credit Usage Estimate</h2>'
-        + summary_row([
-            ("Daily Burn Rate", f"{daily}/day", "#7b1fa2"),
-            ("Used This Month", used, "#2e7d32"),
-            ("Projected Monthly", projected, "#1565c0"),
-        ])
+        + summary_row(
+            [
+                ("Daily Burn Rate", f"{daily}/day", "#7b1fa2"),
+                ("Used This Month", used, "#2e7d32"),
+                ("Projected Monthly", projected, "#1565c0"),
+            ]
+        )
         + f'<div style="font-size:12px;color:#888;margin-top:4px;">'
-        f'{days_left} days remaining in billing period</div>'
-        '</div>'
+        f"{days_left} days remaining in billing period</div>"
+        "</div>"
     )
 
 
@@ -196,5 +200,7 @@ def trend_text(daily_costs):
         return "No daily trend data available."
     lines = ["Daily Trend:"]
     for e in daily_costs:
-        lines.append(f"- {e.get('date', '')}: {currency(e.get('amount'), e.get('unit'))}")
+        lines.append(
+            f"- {e.get('date', '')}: {currency(e.get('amount'), e.get('unit'))}"
+        )
     return "\n".join(lines)

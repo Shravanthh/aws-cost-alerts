@@ -24,12 +24,11 @@ AWS_REGION="$(strip_quotes "${AWS_REGION:-}")"
 AWS_PROFILE="$(strip_quotes "${AWS_PROFILE:-}")"
 PROJECT_NAME="$(strip_quotes "${PROJECT_NAME:-aws-cost-alerts}")"
 SAM_ARTIFACT_BUCKET="$(strip_quotes "${SAM_ARTIFACT_BUCKET:-}")"
-SCHEDULE_EXPRESSION="$(strip_quotes "${SCHEDULE_EXPRESSION:-cron(0 8 * * ? *)}")"
+SCHEDULE_EXPRESSION="$(strip_quotes "${SCHEDULE_EXPRESSION:-cron(0 8 ? * 7 *)}")"
 SENDER_EMAIL="$(strip_quotes "${SENDER_EMAIL:-}")"
 RECIPIENT_EMAILS="$(strip_quotes "${RECIPIENT_EMAILS:-}")"
 EMAIL_SUBJECT_PREFIX="$(strip_quotes "${EMAIL_SUBJECT_PREFIX:-AWS Cost Alert}")"
-BUDGET_PARAMETER_NAME="$(strip_quotes "${BUDGET_PARAMETER_NAME:-/cost-alerts/budget-amount}")"
-BUDGET_DEFAULT_AMOUNT="$(strip_quotes "${BUDGET_DEFAULT_AMOUNT:-10}")"
+BUDGET_AMOUNT="$(strip_quotes "${BUDGET_AMOUNT:-10}")"
 ARCHIVE_ENABLED="$(strip_quotes "${ARCHIVE_ENABLED:-true}")"
 ARCHIVE_RETENTION_DAYS="$(strip_quotes "${ARCHIVE_RETENTION_DAYS:-30}")"
 TOP_SERVICES_COUNT="$(strip_quotes "${TOP_SERVICES_COUNT:-10}")"
@@ -71,14 +70,6 @@ if ! aws "${aws_args[@]}" s3api head-bucket --bucket "$SAM_ARTIFACT_BUCKET" >/de
   aws "${aws_args[@]}" s3 mb "s3://${SAM_ARTIFACT_BUCKET}"
 fi
 
-if ! aws "${aws_args[@]}" ssm get-parameter --name "$BUDGET_PARAMETER_NAME" >/dev/null 2>&1; then
-  echo "Creating budget parameter: $BUDGET_PARAMETER_NAME (default $BUDGET_DEFAULT_AMOUNT)"
-  aws "${aws_args[@]}" ssm put-parameter \
-    --name "$BUDGET_PARAMETER_NAME" \
-    --type String \
-    --value "$BUDGET_DEFAULT_AMOUNT"
-fi
-
 sam build
 
 deploy_args=(
@@ -104,7 +95,7 @@ parameter_overrides=(
   "SenderEmail=$SENDER_EMAIL"
   "RecipientEmails=$RECIPIENT_EMAILS"
   "EmailSubjectPrefix='$EMAIL_SUBJECT_PREFIX'"
-  "BudgetParameterName=$BUDGET_PARAMETER_NAME"
+  "BudgetAmount=$BUDGET_AMOUNT"
   "ArchiveEnabled=$ARCHIVE_ENABLED"
   "ArchiveRetentionDays=$ARCHIVE_RETENTION_DAYS"
   "TopServicesCount=$TOP_SERVICES_COUNT"
